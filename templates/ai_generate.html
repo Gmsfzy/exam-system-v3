@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智能出题 - 在线考试系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        /* 简单的加载动画样式 */
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <!-- 导航栏 -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">在线考试系统</a>
+            <div class="navbar-nav ms-auto">
+                <span class="navbar-text me-3">欢迎, {{ session.username }} (教师)</span>
+                <a class="btn btn-outline-light btn-sm" href="{{ url_for('logout') }}">退出</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-5">
+        <!-- 消息提示区 (Flash Messages) -->
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-info alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="row justify-content-center">
+            <div class="col-md-8">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white py-3">
+                        <h5 class="mb-0 text-primary"><i class="bi bi-robot me-2"></i>AI 一键生成题目</h5>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted small">
+                            <i class="bi bi-info-circle me-1"></i>
+                            提示：AI 会根据您的要求自动生成题目。由于网络延迟，生成过程可能需要 5-15 秒，请耐心等待。
+                        </p>
+
+                        <form action="{{ url_for('ai_generate') }}" method="POST" id="aiForm">
+                            <div class="row g-3">
+                                <!-- 科目 -->
+                                <div class="col-12">
+                                    <label for="topic" class="form-label fw-bold">科目/主题</label>
+                                    <input type="text" class="form-control" id="topic" name="topic" placeholder="例如：Python 基础, 高等数学, 历史常识" required>
+                                </div>
+
+                                <!-- 难度 & 数量 -->
+                                <div class="col-md-6">
+                                    <label for="difficulty" class="form-label fw-bold">难度</label>
+                                    <select class="form-select" id="difficulty" name="difficulty" required>
+                                        <option value="简单">简单</option>
+                                        <option value="中等" selected>中等</option>
+                                        <option value="困难">困难</option>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label for="num" class="form-label fw-bold">生成数量</label>
+                                    <input type="number" class="form-control" id="num" name="num" value="5" min="1" max="20" required>
+                                </div>
+
+                                <!-- 提交按钮 -->
+                                <div class="col-12 mt-4 text-center">
+                                    <button type="submit" class="btn btn-primary btn-lg px-5" id="submitBtn">
+                                        <i class="bi bi-magic me-2"></i> 开始生成
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- 返回链接 -->
+                <div class="text-center mt-3">
+                    <a href="{{ url_for('dashboard') }}" class="text-decoration-none text-secondary">
+                        <i class="bi bi-arrow-left me-1"></i> 返回仪表板
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 脚本：处理加载状态 -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.getElementById('aiForm').onsubmit = function() {
+            var btn = document.getElementById('submitBtn');
+
+            // 1. 禁用按钮，防止重复提交
+            btn.disabled = true;
+
+            // 2. 修改按钮内容，显示加载动画
+            btn.innerHTML = '<span class="loader"></span> AI 正在思考中...';
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-secondary');
+        };
+    </script>
+</body>
+</html>

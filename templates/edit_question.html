@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>编辑题目</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('dashboard') }}">在线考试系统</a>
+            <div class="navbar-nav ms-auto">
+                <span class="navbar-text me-3">欢迎, {{ session.get('username') }}</span>
+                <a class="btn btn-outline-light btn-sm" href="{{ url_for('logout') }}">退出</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-5">
+        <h2>编辑题目</h2>
+        <form method="post">
+            <div class="mb-3">
+                <label for="question_text" class="form-label">题目内容</label>
+                <textarea class="form-control" id="question_text" name="question_text" rows="3" required>{{ question.question_text }}</textarea>
+            </div>
+            <div class="mb-3">
+                <label for="option_a" class="form-label">选项 A</label>
+                <input type="text" class="form-control" id="option_a" name="option_a" value="{{ question.option_a }}" required>
+            </div>
+            <div class="mb-3">
+                <label for="option_b" class="form-label">选项 B</label>
+                <input type="text" class="form-control" id="option_b" name="option_b" value="{{ question.option_b }}" required>
+            </div>
+            <div class="mb-3">
+                <label for="option_c" class="form-label">选项 C</label>
+                <input type="text" class="form-control" id="option_c" name="option_c" value="{{ question.option_c }}">
+            </div>
+            <div class="mb-3">
+                <label for="option_d" class="form-label">选项 D</label>
+                <input type="text" class="form-control" id="option_d" name="option_d" value="{{ question.option_d }}">
+            </div>
+            <div class="mb-3">
+                <label for="correct_answer" class="form-label">正确答案</label>
+                <select class="form-select" id="correct_answer" name="correct_answer" required>
+                    <option value="A" {% if question.correct_answer == 'A' %}selected{% endif %}>A</option>
+                    <option value="B" {% if question.correct_answer == 'B' %}selected{% endif %}>B</option>
+                    <option value="C" {% if question.correct_answer == 'C' %}selected{% endif %}>C</option>
+                    <option value="D" {% if question.correct_answer == 'D' %}selected{% endif %}>D</option>
+                </select>
+            </div>
+            <div class="mb-3">
+                <label for="subject" class="form-label">科目</label>
+                <input type="text" class="form-control" id="subject" name="subject" value="{{ question.subject }}" required>
+            </div>
+            <div class="mb-3">
+                <label for="difficulty" class="form-label">难度</label>
+                <select class="form-select" id="difficulty" name="difficulty" required>
+                    <option value="easy" {% if question.difficulty == 'easy' %}selected{% endif %}>简单</option>
+                    <option value="medium" {% if question.difficulty == 'medium' %}selected{% endif %}>中等</option>
+                    <option value="hard" {% if question.difficulty == 'hard' %}selected{% endif %}>困难</option>
+                </select>
+            </div>
+            <button type="submit" class="btn btn-primary">更新题目</button>
+            <a href="{{ url_for('manage_questions') }}" class="btn btn-secondary">取消</a>
+        </form>
+    </div>
+</body>
+</html>

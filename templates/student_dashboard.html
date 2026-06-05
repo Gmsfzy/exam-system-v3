@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>学生仪表板 - 在线考试系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">在线考试系统</a>
+            <div class="navbar-nav ms-auto">
+                <span class="navbar-text me-3">欢迎, {{ session.username }} (学生)</span>
+                <a class="btn btn-outline-light" href="{{ url_for('logout') }}">退出</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-5">
+        <h2>学生仪表板</h2>
+
+        <div class="panel">
+            <h3>正在进行的考试</h3>
+            {% if current_exams %}
+                {% for exam in current_exams %}
+                    <div class="exam-item">
+                        <strong>{{ exam.title }}</strong>
+                        <span class="badge bg-success">进行中</span>
+                        <span>截止: {{ exam.end_time }}</span>
+                        <a href="{{ url_for('take_exam', exam_id=exam.id) }}" class="btn btn-primary btn-sm">立即参加</a>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <p>暂无正在进行的考试</p>
+            {% endif %}
+        </div>
+
+        <!-- 可参加的考试 -->
+        <!-- ✅ 修复：将废弃的 exams 替换为 upcoming_exams -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>即将开始的考试</h4>
+            </div>
+            <div class="card-body">
+                {% if upcoming_exams %}
+                    <div class="row">
+                        {% for exam in upcoming_exams %}
+                        <div class="col-md-6 mb-3">
+                            <div class="card h-100">
+                                <div class="card-body">
+                                    <h5 class="card-title">{{ exam.title }}</h5>
+                                    <p class="card-text">
+                                        <strong>科目:</strong> {{ exam.subject }}<br>
+                                        <strong>教师:</strong> {{ exam.teacher_name }}<br>
+                                        <strong>开始时间:</strong> {{ exam.start_time }}
+                                    </p>
+                                </div>
+                                <div class="card-footer">
+                                    <span class="badge bg-warning text-dark">等待开考</span>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="text-muted">暂无即将开始的考试</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- 历史考试记录 -->
+        <div class="card">
+            <div class="card-header">
+                <h4>历史考试记录</h4>
+            </div>
+            <div class="card-body">
+                {% if completed_exams %}
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>考试名称</th>
+                                <th>得分</th>
+                                <th>总题数</th>
+                                <th>完成时间</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for exam in completed_exams %}
+                            <tr>
+                                <td>{{ exam.exam_name }}</td>
+                                <td>{{ exam.score }}/{{ exam.total_questions }}</td>
+                                <td>{{ exam.total_questions }}</td>
+                                <td>{{ exam.submit_time }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p>暂无历史考试记录</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

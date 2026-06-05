@@ -1,0 +1,8 @@
+# 忽略缓存和IDE
+__pycache__/
+.idea/
+.vscode/
+
+# 忽略虚拟环境
+venv/
+env/
