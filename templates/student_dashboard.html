@@ -83,6 +83,7 @@
                                 <th>得分</th>
                                 <th>总题数</th>
                                 <th>完成时间</th>
+                                <th>操作</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -92,6 +93,13 @@
                                 <td>{{ exam.score }}/{{ exam.total_questions }}</td>
                                 <td>{{ exam.total_questions }}</td>
                                 <td>{{ exam.submit_time }}</td>
+                                <td>
+                                    {% if exam.status == 'submitted' %}
+                                        <a href="{{ url_for('view_exam_result', record_id=exam.id) }}" class="btn btn-primary btn-sm">查看试卷</a>
+                                    {% else %}
+                                        <span class="badge bg-warning text-dark">进行中</span>
+                                    {% endif %}
+                                </td>
                             </tr>
                             {% endfor %}
                         </tbody>

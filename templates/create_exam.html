@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>创建考试 - 在线考试系统</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
@@ -18,7 +19,13 @@
     </nav>
 
     <div class="container mt-5">
-        <h2>创建考试</h2>
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="mb-0">创建考试</h2>
+            <div>
+                <a href="{{ url_for('dashboard') }}" class="btn btn-secondary me-2">返回仪表板</a>
+                <button type="submit" form="create_exam_form" class="btn btn-primary">创建考试</button>
+            </div>
+        </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -28,7 +35,7 @@
             {% endif %}
         {% endwith %}
 
-        <form method="POST">
+        <form method="POST" id="create_exam_form">
             <div class="mb-3">
                 <label for="exam_name" class="form-label">考试名称</label>
                 <input type="text" class="form-control" id="exam_name" name="exam_name" required>
@@ -76,36 +83,69 @@
             </div>
 
             <div class="mb-3">
-                <label class="form-label">选择题目</label>
-                <div class="row">
-                    {% for question in questions %}
-                    <div class="col-md-6 col-lg-4 mb-2">
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" name="questions" value="{{ question.id }}" id="question_{{ question.id }}">
-                            <label class="form-check-label small" for="question_{{ question.id }}">
-                                <strong>{{ loop.index }}.</strong>
-                                {{ question.question_text[:50] }}...
-                                <br>
-                                <small class="text-muted">
-                                    类型: {{ '单选' if question.question_type == 'multiple_choice' else
-                                          '多选' if question.question_type == 'multiple_select' else
-                                          '判断' if question.question_type == 'true_false' else
-                                          '简答' if question.question_type == 'short_answer' else
-                                          '编程' if question.question_type == 'programming' else question.question_type }},
-                                    分值: {{ question.points }}
-                                </small>
-                            </label>
+                <label class="form-label">选择题目 <span class="text-muted small">（按专业课分组）</span></label>
+                <div class="mb-2">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="selectAll(true)">全选</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="selectAll(false)">取消全选</button>
+                </div>
+
+                {% for group in questions|groupby('subject') %}
+                {% set subject_name = group.grouper if group.grouper else '未分类' %}
+                <div class="card mb-2">
+                    <div class="card-header py-2 d-flex align-items-center" style="cursor:pointer;" data-bs-toggle="collapse" data-bs-target="#group_{{ loop.index }}">
+                        <i class="bi bi-folder me-2"></i>
+                        <strong>{{ subject_name }}</strong>
+                        <span class="badge bg-secondary ms-2">{{ group.list|length }} 题</span>
+                    </div>
+                    <div class="collapse show" id="group_{{ loop.index }}">
+                        <div class="card-body">
+                            <div class="row">
+                                {% for question in group.list %}
+                                <div class="col-md-6 col-lg-4 mb-2">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="questions" value="{{ question.id }}" id="question_{{ question.id }}">
+                                        <label class="form-check-label small" for="question_{{ question.id }}">
+                                            {{ question.question_text[:50] }}{% if question.question_text|length > 50 %}...{% endif %}
+                                            <br>
+                                            <small class="text-muted">
+                                                {% if question.question_type == 'multiple_choice' %}
+                                                    <span class="badge bg-primary">单选</span>
+                                                {% elif question.question_type == 'multiple_select' %}
+                                                    <span class="badge bg-info text-dark">多选</span>
+                                                {% elif question.question_type == 'true_false' %}
+                                                    <span class="badge bg-warning text-dark">判断</span>
+                                                {% elif question.question_type == 'short_answer' %}
+                                                    <span class="badge bg-success">简答</span>
+                                                {% elif question.question_type == 'programming' %}
+                                                    <span class="badge bg-dark">编程</span>
+                                                {% endif %}
+                                                {{ question.difficulty }} | {{ question.points }}分
+                                            </small>
+                                        </label>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
                         </div>
                     </div>
-                    {% endfor %}
                 </div>
+                {% endfor %}
+
+                {% if not questions %}
+                    <p class="text-muted">题库为空，请先添加题目。</p>
+                {% endif %}
             </div>
 
-            <button type="submit" class="btn btn-primary">创建考试</button>
-            <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">返回仪表板</a>
         </form>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function selectAll(checked) {
+            document.querySelectorAll('input[name="questions"]').forEach(function(cb) {
+                cb.checked = checked;
+            });
+        }
+    </script>
 </body>
 </html>

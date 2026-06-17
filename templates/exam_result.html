@@ -14,12 +14,24 @@
 <div class="container mt-4 mb-5">
     <div class="card border-primary shadow-sm">
         <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-            <h4 class="mb-0">📝 考试结果与解析</h4>
+            <h4 class="mb-0">📝 考试结果</h4>
             <span class="badge bg-light text-primary fs-5">
                 得分: {{ record.score if record.score is not none else '待评分' }}
             </span>
         </div>
         <div class="card-body">
+
+            {# ========== 解析可见性提示 ========== #}
+            {% if show_explanation %}
+                <div class="alert alert-success">
+                    <strong>✅ 考试已结束</strong> — 您可以查看每道题的参考答案与解析。
+                </div>
+            {% else %}
+                <div class="alert alert-warning">
+                    <strong>⏳ 考试进行中</strong> — 当前仅可查看您的作答记录。考试结束或教师停止考试后，将开放参考答案与解析。
+                </div>
+            {% endif %}
+
             {% for q in questions %}
             {% set qid_str = q.id|string %}
             {% set stu_ans = student_answers.get(qid_str, '') %}
@@ -48,10 +60,12 @@
                                 <small class="text-muted">你的代码:</small>
                                 <pre class="code-block"><code class="language-python">{{ stu_ans or '# 未作答' }}</code></pre>
                             </div>
+                            {% if show_explanation %}
                             <div class="col-md-6">
                                 <small class="text-muted">参考答案:</small>
-                                <pre class="code-block"><code class="language-python">{{ q.correct_answer or '暂无参考代码' }}</code></pre>
+                                <pre class="code-block"><code class="language-python">{{ q.solution_code or q.correct_answer or '暂无参考代码' }}</code></pre>
                             </div>
+                            {% endif %}
                         </div>
 
                     {# ========== 分支2: 简答题 ========== #}
@@ -62,38 +76,56 @@
                                 {{ stu_ans if stu_ans.strip() else '未作答' }}
                             </div>
                         </div>
+                        {% if show_explanation %}
                         <div class="mb-2">
                             <small class="text-muted">参考答案/得分点:</small>
                             <div class="p-2 bg-white rounded border text-success">{{ q.correct_answer or '暂无' }}</div>
                         </div>
+                        {% endif %}
 
                     {# ========== 分支3: 客观题 (单选/多选/判断) ========== #}
                     {% else %}
-                        {% if q.options %}
-                            <div class="mb-2 text-muted small">选项: {{ q.options }}</div>
+                        {% if q.option_a or q.option_b or q.option_c or q.option_d %}
+                            <div class="mb-2">
+                                {% if q.option_a %}<div class="small">A. {{ q.option_a }}</div>{% endif %}
+                                {% if q.option_b %}<div class="small">B. {{ q.option_b }}</div>{% endif %}
+                                {% if q.option_c %}<div class="small">C. {{ q.option_c }}</div>{% endif %}
+                                {% if q.option_d %}<div class="small">D. {{ q.option_d }}</div>{% endif %}
+                                {% if q.option_e %}<div class="small">E. {{ q.option_e }}</div>{% endif %}
+                                {% if q.option_f %}<div class="small">F. {{ q.option_f }}</div>{% endif %}
+                            </div>
                         {% endif %}
                         <div class="row">
                             <div class="col-md-6">
                                 <strong>🙋 你的答案:</strong>
-                                <span class="{% if stu_ans == q.correct_answer %}answer-correct{% else %}answer-wrong{% endif %}">
-                                    {{ stu_ans or '未作答' }}
-                                </span>
+                                {% if show_explanation %}
+                                    <span class="{% if stu_ans == q.correct_answer %}answer-correct{% else %}answer-wrong{% endif %}">
+                                        {{ stu_ans or '未作答' }}
+                                    </span>
+                                {% else %}
+                                    <span class="fw-bold">{{ stu_ans or '未作答' }}</span>
+                                {% endif %}
                             </div>
+                            {% if show_explanation %}
                             <div class="col-md-6">
                                 <strong>✅ 正确答案:</strong>
                                 <span class="answer-correct">{{ q.correct_answer }}</span>
                             </div>
+                            {% endif %}
                         </div>
                     {% endif %}
 
                     {# ========== 通用解析区 ========== #}
+                    {% if show_explanation %}
                     <hr class="my-3">
-                    {% if q.explanation %}
-                        <div class="alert alert-info py-2 mb-0">
-                            <strong>💡 解析：</strong>{{ q.explanation }}
-                        </div>
-                    {% else %}
-                        <div class="text-muted fst-italic small">暂无解析</div>
+                    <div class="bg-light p-3 rounded">
+                        <strong>📖 解析：</strong>
+                        {% if q.explanation %}
+                            <div class="mt-1 text-dark">{{ q.explanation }}</div>
+                        {% else %}
+                            <div class="mt-1 text-muted fst-italic">暂无解析</div>
+                        {% endif %}
+                    </div>
                     {% endif %}
                 </div>
             </div>

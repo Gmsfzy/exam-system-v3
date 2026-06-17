@@ -70,6 +70,7 @@
         <a href="{{ url_for('manage_questions') }}"><i class="fas fa-list"></i> 管理题库</a>
         <a href="{{ url_for('create_exam') }}"><i class="fas fa-file-alt"></i> 创建考试</a>
         <a href="{{ url_for('ai_generate') }}"><i class="fas fa-robot"></i> AI 出题</a>
+        <a href="{{ url_for('grade_subjective_questions') }}"><i class="fas fa-check-circle"></i> 评分复审</a>
         <a href="{{ url_for('logout') }}"><i class="fas fa-sign-out-alt"></i> 退出登录</a>
     </div>
 
@@ -94,6 +95,21 @@
             {% endwith %}
 
             <div class="row">
+                <!-- 待复审提醒卡片 -->
+                {% if pending_grading %}
+                <div class="col-12 mb-4">
+                    <div class="card border-warning">
+                        <div class="card-header bg-warning text-white d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0"><i class="fas fa-clock"></i> 待复审题目</h5>
+                            <a href="{{ url_for('grade_subjective_questions') }}" class="btn btn-light btn-sm">前往复审</a>
+                        </div>
+                        <div class="card-body">
+                            <p class="mb-0">当前有 <strong>{{ pending_grading|length }}</strong> 条考试记录等待复审。AI 已完成自动批改，请教师确认或调整分数。</p>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
                 <!-- 考试管理卡片 -->
                 <div class="col-md-6 mb-4">
                     <div class="card">

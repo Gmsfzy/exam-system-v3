@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>添加题目 - 在线考试系统</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <link href="https://cdn.jsdelivr.net/npm/summernote@0.8.18/dist/summernote-lite.min.css" rel="stylesheet">
 </head>
 <body>
@@ -19,7 +20,13 @@
     </nav>
 
     <div class="container mt-5">
-        <h2>添加题目</h2>
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="mb-0">添加题目</h2>
+            <div>
+                <a href="{{ url_for('dashboard') }}" class="btn btn-secondary me-2">返回仪表板</a>
+                <button type="submit" form="add_question_form" class="btn btn-primary">添加题目</button>
+            </div>
+        </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -35,7 +42,7 @@
             </a>
         </div>
 
-        <form method="POST">
+        <form method="POST" id="add_question_form">
             <div class="mb-3">
                 <label for="question_text" class="form-label">题目内容</label>
                 <div id="question_text_editor"></div>
@@ -127,6 +134,18 @@ def add_numbers(a, b):
     return a + b"></textarea>
             </div>
 
+            <!-- 简答题参考答案 -->
+            <div class="mb-3" id="short-answer-section" style="display: none;">
+                <label for="short_answer_ref" class="form-label">参考答案</label>
+                <textarea class="form-control" id="short_answer_ref" name="correct_answer" rows="5" placeholder="输入标准参考答案，包含得分要点"></textarea>
+            </div>
+
+            <!-- 题目解析 -->
+            <div class="mb-3">
+                <label for="explanation" class="form-label">题目解析 <span class="text-muted small">（可选，也可后续用 AI 生成）</span></label>
+                <textarea class="form-control" id="explanation" name="explanation" rows="4" placeholder="输入题目解析，包括正确答案分析、知识点补充等"></textarea>
+            </div>
+
             <div class="row">
                 <div class="col-md-6">
                     <div class="mb-3">
@@ -146,8 +165,6 @@ def add_numbers(a, b):
                 </div>
             </div>
 
-            <button type="submit" class="btn btn-primary">添加题目</button>
-            <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">返回仪表板</a>
         </form>
     </div>
 
@@ -170,11 +187,13 @@ def add_numbers(a, b):
             const optionsSection = document.getElementById('options-section');
             const correctAnswerSection = document.getElementById('correct-answer-section');
             const programmingSection = document.getElementById('programming-section');
+            const shortAnswerSection = document.getElementById('short-answer-section');
             const correctAnswerInput = document.getElementById('correct_answer');
 
             if (['multiple_choice', 'multiple_select', 'true_false'].includes(questionType)) {
                 optionsSection.style.display = 'block';
                 programmingSection.style.display = 'none';
+                shortAnswerSection.style.display = 'none';
 
                 if (questionType === 'true_false') {
                     // 判断题特殊处理
@@ -207,11 +226,13 @@ def add_numbers(a, b):
                 // 编程题：隐藏选项，显示编程特定字段
                 optionsSection.style.display = 'none';
                 programmingSection.style.display = 'block';
+                shortAnswerSection.style.display = 'none';
                 correctAnswerSection.style.display = 'none';
             } else {
-                // 简答题：隐藏选项，不显示编程字段
+                // 简答题：隐藏选项，显示参考答案
                 optionsSection.style.display = 'none';
                 programmingSection.style.display = 'none';
+                shortAnswerSection.style.display = 'block';
                 correctAnswerSection.style.display = 'none';
             }
         }

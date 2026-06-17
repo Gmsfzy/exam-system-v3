@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <title>编辑题目</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
@@ -11,58 +12,163 @@
             <a class="navbar-brand" href="{{ url_for('dashboard') }}">在线考试系统</a>
             <div class="navbar-nav ms-auto">
                 <span class="navbar-text me-3">欢迎, {{ session.get('username') }}</span>
+                <a class="btn btn-outline-light btn-sm me-2" href="javascript:history.back()">返回</a>
                 <a class="btn btn-outline-light btn-sm" href="{{ url_for('logout') }}">退出</a>
             </div>
         </div>
     </nav>
 
     <div class="container mt-5">
-        <h2>编辑题目</h2>
-        <form method="post">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                <h2 class="mb-0">编辑题目</h2>
+                {% if question.question_type == 'multiple_choice' %}
+                    <span class="badge bg-primary">单选题</span>
+                {% elif question.question_type == 'multiple_select' %}
+                    <span class="badge bg-info text-dark">多选题</span>
+                {% elif question.question_type == 'true_false' %}
+                    <span class="badge bg-warning text-dark">判断题</span>
+                {% elif question.question_type == 'short_answer' %}
+                    <span class="badge bg-success">简答题</span>
+                {% elif question.question_type == 'programming' %}
+                    <span class="badge bg-dark">编程题</span>
+                {% endif %}
+            </div>
+            <div>
+                <a href="{{ url_for('manage_questions') }}" class="btn btn-secondary">取消</a>
+                <button type="submit" form="edit_form" class="btn btn-primary">更新题目</button>
+            </div>
+        </div>
+
+        <form method="post" id="edit_form">
             <div class="mb-3">
-                <label for="question_text" class="form-label">题目内容</label>
+                <label for="question_text" class="form-label fw-bold">题目内容</label>
                 <textarea class="form-control" id="question_text" name="question_text" rows="3" required>{{ question.question_text }}</textarea>
             </div>
-            <div class="mb-3">
-                <label for="option_a" class="form-label">选项 A</label>
-                <input type="text" class="form-control" id="option_a" name="option_a" value="{{ question.option_a }}" required>
+
+            <!-- 客观题选项区域 -->
+            {% if question.question_type in ['multiple_choice', 'multiple_select', 'true_false'] %}
+            <div id="options-section">
+                <label class="form-label fw-bold">选项</label>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="mb-2">
+                            <label class="form-label small">选项 A</label>
+                            <input type="text" class="form-control" name="option_a" value="{{ question.option_a or '' }}">
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small">选项 B</label>
+                            <input type="text" class="form-control" name="option_b" value="{{ question.option_b or '' }}">
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="mb-2">
+                            <label class="form-label small">选项 C</label>
+                            <input type="text" class="form-control" name="option_c" value="{{ question.option_c or '' }}">
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small">选项 D</label>
+                            <input type="text" class="form-control" name="option_d" value="{{ question.option_d or '' }}">
+                        </div>
+                    </div>
+                </div>
+                {% if question.question_type == 'multiple_select' %}
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="mb-2">
+                            <label class="form-label small">选项 E（可选）</label>
+                            <input type="text" class="form-control" name="option_e" value="{{ question.option_e or '' }}">
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="mb-2">
+                            <label class="form-label small">选项 F（可选）</label>
+                            <input type="text" class="form-control" name="option_f" value="{{ question.option_f or '' }}">
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
             </div>
+
             <div class="mb-3">
-                <label for="option_b" class="form-label">选项 B</label>
-                <input type="text" class="form-control" id="option_b" name="option_b" value="{{ question.option_b }}" required>
-            </div>
-            <div class="mb-3">
-                <label for="option_c" class="form-label">选项 C</label>
-                <input type="text" class="form-control" id="option_c" name="option_c" value="{{ question.option_c }}">
-            </div>
-            <div class="mb-3">
-                <label for="option_d" class="form-label">选项 D</label>
-                <input type="text" class="form-control" id="option_d" name="option_d" value="{{ question.option_d }}">
-            </div>
-            <div class="mb-3">
-                <label for="correct_answer" class="form-label">正确答案</label>
-                <select class="form-select" id="correct_answer" name="correct_answer" required>
+                <label for="correct_answer" class="form-label fw-bold">正确答案</label>
+                {% if question.question_type == 'multiple_choice' %}
+                <select class="form-select" name="correct_answer" required>
                     <option value="A" {% if question.correct_answer == 'A' %}selected{% endif %}>A</option>
                     <option value="B" {% if question.correct_answer == 'B' %}selected{% endif %}>B</option>
                     <option value="C" {% if question.correct_answer == 'C' %}selected{% endif %}>C</option>
                     <option value="D" {% if question.correct_answer == 'D' %}selected{% endif %}>D</option>
+                    {% if question.option_e %}<option value="E" {% if question.correct_answer == 'E' %}selected{% endif %}>E</option>{% endif %}
+                    {% if question.option_f %}<option value="F" {% if question.correct_answer == 'F' %}selected{% endif %}>F</option>{% endif %}
                 </select>
+                {% elif question.question_type == 'multiple_select' %}
+                <input type="text" class="form-control" name="correct_answer" value="{{ question.correct_answer or '' }}" placeholder="多个答案用逗号分隔，如 A,B,C" required>
+                {% elif question.question_type == 'true_false' %}
+                <select class="form-select" name="correct_answer" required>
+                    <option value="A" {% if question.correct_answer == 'A' %}selected{% endif %}>A（正确）</option>
+                    <option value="B" {% if question.correct_answer == 'B' %}selected{% endif %}>B（错误）</option>
+                </select>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <!-- 编程题字段 -->
+            {% if question.question_type == 'programming' %}
+            <div class="mb-3">
+                <label for="correct_answer" class="form-label fw-bold">参考答案</label>
+                <textarea class="form-control" name="correct_answer" rows="3">{{ question.correct_answer or '' }}</textarea>
             </div>
             <div class="mb-3">
-                <label for="subject" class="form-label">科目</label>
-                <input type="text" class="form-control" id="subject" name="subject" value="{{ question.subject }}" required>
+                <label for="test_cases" class="form-label fw-bold">测试用例 (JSON格式)</label>
+                <textarea class="form-control" name="test_cases" rows="6">{{ question.test_cases or '[]' }}</textarea>
             </div>
             <div class="mb-3">
-                <label for="difficulty" class="form-label">难度</label>
-                <select class="form-select" id="difficulty" name="difficulty" required>
-                    <option value="easy" {% if question.difficulty == 'easy' %}selected{% endif %}>简单</option>
-                    <option value="medium" {% if question.difficulty == 'medium' %}selected{% endif %}>中等</option>
-                    <option value="hard" {% if question.difficulty == 'hard' %}selected{% endif %}>困难</option>
-                </select>
+                <label for="solution_code" class="form-label fw-bold">参考答案代码</label>
+                <textarea class="form-control" name="solution_code" rows="10" style="font-family: monospace;">{{ question.solution_code or '' }}</textarea>
             </div>
-            <button type="submit" class="btn btn-primary">更新题目</button>
-            <a href="{{ url_for('manage_questions') }}" class="btn btn-secondary">取消</a>
+            {% endif %}
+
+            <!-- 简答题参考答案 -->
+            {% if question.question_type == 'short_answer' %}
+            <div class="mb-3">
+                <label for="correct_answer" class="form-label fw-bold">参考答案</label>
+                <textarea class="form-control" name="correct_answer" rows="5" placeholder="标准参考答案，包含得分要点">{{ question.correct_answer or '' }}</textarea>
+            </div>
+            {% endif %}
+
+            <!-- 题目解析 -->
+            <div class="mb-3">
+                <label for="explanation" class="form-label fw-bold">
+                    题目解析
+                    <span class="text-muted small">（可选，也可用 AI 生成）</span>
+                </label>
+                <textarea class="form-control" id="explanation" name="explanation" rows="4" placeholder="题目解析，包括正确答案分析、知识点补充等">{{ question.explanation or '' }}</textarea>
+            </div>
+
+            <div class="row">
+                <div class="col-md-8">
+                    <div class="mb-3">
+                        <label for="subject" class="form-label fw-bold">专业课/科目</label>
+                        <input type="text" class="form-control" id="subject" name="subject" value="{{ question.subject or '' }}" required>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label for="difficulty" class="form-label fw-bold">难度</label>
+                        <select class="form-select" id="difficulty" name="difficulty" required>
+                            <option value="简单" {% if question.difficulty == '简单' %}selected{% endif %}>简单</option>
+                            <option value="中等" {% if question.difficulty == '中等' %}selected{% endif %}>中等</option>
+                            <option value="困难" {% if question.difficulty == '困难' %}selected{% endif %}>困难</option>
+                            <option value="easy" {% if question.difficulty == 'easy' %}selected{% endif %}>简单</option>
+                            <option value="medium" {% if question.difficulty == 'medium' %}selected{% endif %}>中等</option>
+                            <option value="hard" {% if question.difficulty == 'hard' %}selected{% endif %}>困难</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
         </form>
     </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
