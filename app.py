@@ -9,26 +9,28 @@
 
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
-from tenacity import retry, stop_after_attempt, wait_fixed # 用于处理网络重试
 import sqlite3
 import datetime
 import json
-import random
-import re
 import subprocess
 import tempfile
 import os
-import hashlib
+import sys
 import secrets
-from PIL import Image
 import base64
-from io import BytesIO
-import threading
-import time
+import logging
+from contextlib import contextmanager
+
+# 配置日志系统
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # 接入千问大模型
 import dashscope
-from dashscope import Generation
 
 
 app = Flask(__name__)
@@ -164,15 +166,29 @@ def init_db():
         # 如果列已存在，这会报错，所以我们用 try-except 忽略它
         conn.execute("ALTER TABLE exams ADD COLUMN status TEXT DEFAULT 'inactive'")
         conn.commit()
-        print("✅ 数据库已更新：添加了 status 列")
+        logger.info("数据库已更新：添加了 status 列")
     except Exception as e:
         # 如果报错说 "duplicate column name"，说明列已经存在，这是好事
         if "duplicate column name" in str(e):
             pass
         else:
-            print(f"⚠️ 数据库检查出现其他错误: {e}")
+            logger.warning(f"数据库检查出现其他错误: {e}")
     finally:
         conn.close()
+
+    # 尝试给 questions 表添加 explanation 列
+    conn2 = sqlite3.connect('exam_system.db')
+    try:
+        conn2.execute("ALTER TABLE questions ADD COLUMN explanation TEXT")
+        conn2.commit()
+        logger.info("数据库已更新：添加了 explanation 列")
+    except Exception as e:
+        if "duplicate column name" in str(e):
+            pass
+        else:
+            logger.warning(f"数据库检查出现其他错误: {e}")
+    finally:
+        conn2.close()
 
 
 # 在 app 启动时立即执行一次
@@ -184,6 +200,16 @@ def get_db_connection():
     conn = sqlite3.connect('exam_system.db')
     conn.row_factory = sqlite3.Row  # 使结果可以通过列名访问
     return conn
+
+
+# 数据库上下文管理器：确保连接总是被正确关闭
+@contextmanager
+def get_db():
+    conn = get_db_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 # 登录装饰器
@@ -206,10 +232,9 @@ def role_required(required_role):
             if 'user_id' not in session:
                 return redirect(url_for('login'))
 
-            conn = get_db_connection()
-            user = conn.execute('SELECT role FROM users WHERE id = ?',
-                               (session['user_id'],)).fetchone()
-            conn.close()
+            with get_db() as conn:
+                user = conn.execute('SELECT role FROM users WHERE id = ?',
+                                   (session['user_id'],)).fetchone()
 
             if user['role'] != required_role:
                 flash('您没有权限访问此页面', 'error')
@@ -240,61 +265,64 @@ def is_answer_correct(student_answer, correct_answer, question_type):
 # 编程题自动评测函数
 def evaluate_programming_solution(student_code, test_cases_json, reference_solution=None):
     """
-    自动评测编程题解决方案
+    自动评测编程题解决方案（使用子进程隔离执行，限制资源访问）
     :param student_code: 学生提交的代码
     :param test_cases_json: 测试用例JSON字符串
     :param reference_solution: 参考答案（可选）
-    :return: 通过的测试用例数，总测试用例数
+    :return: (通过的测试用例数, 总测试用例数)
     """
     try:
         test_cases = json.loads(test_cases_json)
         passed = 0
         total = len(test_cases)
 
-        # 为每个测试用例创建临时文件并执行
+        # 构建受限的环境变量，移除敏感信息
+        restricted_env = {
+            'PATH': os.environ.get('PATH', ''),
+            'PYTHONIOENCODING': 'utf-8',
+        }
+
         for case in test_cases:
             input_data = case.get('input', '')
-            expected_output = case.get('expected_output', '')
+            expected_output = case.get('expected_output', '').strip()
 
             # 创建临时Python文件
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
-                # 写入学生代码
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as temp_file:
                 temp_file.write(student_code)
-                temp_file.write('\n\n')
+                temp_file_name = temp_file.name
 
-                # 添加测试代码
-                if input_data.strip():
-                    # 如果有输入数据，模拟输入
-                    temp_file.write(f'import sys\n')
-                    temp_file.write(f'sys.stdin = open("/dev/stdin", "r")\n')
-                    temp_file.write(f'original_input = input\n')
-                    temp_file.write(f'original_print = print\n')
-                    temp_file.write(f'captured_output = []\n')
-                    temp_file.write(f'exec(open("{temp_file.name}", "r").read())\n')
-                else:
-                    # 直接执行学生代码
-                    exec_globals = {}
-                    exec(student_code, exec_globals)
+            try:
+                # 使用子进程隔离执行，设置超时防止死循环
+                # -S: 不导入 site 模块，减少可用模块
+                # -u: 无缓冲输出
+                result = subprocess.run(
+                    [sys.executable, '-S', '-u', temp_file_name],
+                    input=input_data,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,  # 5秒超时
+                    env=restricted_env,  # 受限环境变量
+                )
+                output = result.stdout.strip()
 
-                    # 获取输出（如果有的话）
-                    captured_output = []
-                    original_print = print
-                    def capture_print(*args, **kwargs):
-                        captured_output.extend(args)
-                    print = capture_print
-
-                    # 执行代码
-                    exec(student_code, {'print': capture_print})
-
-                    output = ''.join(str(x) for x in captured_output).strip()
-
-                    # 比较输出
-                    if output == expected_output.strip():
-                        passed += 1
+                if output == expected_output:
+                    passed += 1
+                elif result.returncode != 0:
+                    logger.debug(f"编程题评测运行错误: {result.stderr.strip()}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"编程题评测超时: 测试用例期望输出 '{expected_output}'")
+            except Exception as e:
+                logger.error(f"编程题评测执行异常: {e}")
+            finally:
+                # 清理临时文件
+                try:
+                    os.unlink(temp_file_name)
+                except OSError:
+                    pass
 
         return passed, total
     except Exception as e:
-        # 发生错误时，认为所有测试用例都失败
+        logger.error(f"编程题评测异常: {e}")
         return 0, len(json.loads(test_cases_json)) if test_cases_json else 0
 
 
@@ -346,9 +374,8 @@ def grade_short_answer_ai(question_text, standard_answer_hint, student_answer):
         return ai_score, ai_comment
 
     except Exception as e:
-        print(f"AI 评分出错: {e}")
-        # 出错时返回一个中间值，或者标记为待人工复核
-        return 5, "AI 评分系统暂时繁忙，此为暂定分数。"
+        logger.error(f"AI 评分出错: {e}")
+        # 出错时返回 None，标记为待人工复核
         return None, "AI 评分系统暂时繁忙，请人工复核"
 
 
@@ -379,13 +406,12 @@ def detect_cheating(session_id, action, details=None):
     # conn.commit()
     # conn.close()
 
-    conn = get_db_connection()
-    try:
+    with get_db() as conn:
         record = conn.execute('SELECT anti_cheat_logs FROM exam_records WHERE id = ?', (session_id,)).fetchone()
 
         # ✅ 核心修复1：防御记录不存在的情况
         if record is None:
-            print(f"[WARNING] 反作弊日志写入失败: 找不到 exam_record id={session_id}")
+            logger.warning(f"反作弊日志写入失败: 找不到 exam_record id={session_id}")
             return
 
         # ✅ 核心修复2：防御字段为 None 或非法 JSON 字符串的情况
@@ -393,7 +419,7 @@ def detect_cheating(session_id, action, details=None):
         try:
             logs = json.loads(raw_logs) if raw_logs else []
         except (json.JSONDecodeError, TypeError):
-            print(f"[WARNING] exam_record id={session_id} 的 anti_cheat_logs JSON 解析失败，已重置")
+            logger.warning(f"exam_record id={session_id} 的 anti_cheat_logs JSON 解析失败，已重置")
             logs = []
 
         timestamp = datetime.datetime.now()
@@ -407,9 +433,6 @@ def detect_cheating(session_id, action, details=None):
         conn.execute('UPDATE exam_records SET anti_cheat_logs = ? WHERE id = ?',
                      (json.dumps(logs), session_id))
         conn.commit()
-    finally:
-        # ✅ 核心修复3：确保数据库连接在任何情况下都能被正确关闭
-        conn.close()
 
 
 # 路由：主页
@@ -429,11 +452,10 @@ def register():
         hashed_password = generate_password_hash(password)
 
         try:
-            conn = get_db_connection()
-            conn.execute('INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
-                        (username, hashed_password, role))
-            conn.commit()
-            conn.close()
+            with get_db() as conn:
+                conn.execute('INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
+                            (username, hashed_password, role))
+                conn.commit()
 
             flash('注册成功，请登录', 'success')
             return redirect(url_for('login'))
@@ -450,10 +472,9 @@ def login():
         username = request.form['username']
         password = request.form['password']
 
-        conn = get_db_connection()
-        user = conn.execute('SELECT * FROM users WHERE username = ?',
-                           (username,)).fetchone()
-        conn.close()
+        with get_db() as conn:
+            user = conn.execute('SELECT * FROM users WHERE username = ?',
+                               (username,)).fetchone()
 
         if user and check_password_hash(user['password'], password):
             session['user_id'] = user['id']
@@ -479,91 +500,81 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    conn = get_db_connection()
+    with get_db() as conn:
+        if session['role'] == 'teacher':
+            # 教师视图：显示他们创建的考试和题目
+            exams = conn.execute(
+                'SELECT e.*, COUNT(eq.id) as question_count FROM exams e '
+                'LEFT JOIN exam_questions eq ON e.id = eq.exam_id '
+                'WHERE e.teacher_id = ? GROUP BY e.id ORDER BY e.created_at DESC',
+                (session['user_id'],)
+            ).fetchall()
 
-    if session['role'] == 'teacher':
-        # 教师视图：显示他们创建的考试和题目
-        exams = conn.execute(
-            'SELECT e.*, COUNT(eq.id) as question_count FROM exams e '
-            'LEFT JOIN exam_questions eq ON e.id = eq.exam_id '
-            'WHERE e.teacher_id = ? GROUP BY e.id ORDER BY e.created_at DESC',
-            (session['user_id'],)
-        ).fetchall()
+            questions = conn.execute(
+                'SELECT * FROM questions WHERE teacher_id = ? ORDER BY created_at DESC',
+                (session['user_id'],)
+            ).fetchall()
 
-        questions = conn.execute(
-            'SELECT * FROM questions WHERE teacher_id = ? ORDER BY created_at DESC',
-            (session['user_id'],)
-        ).fetchall()
+            # 获取待评分的考试记录
+            pending_grading = conn.execute('''
+                SELECT er.*, e.title, u.username as student_name FROM exam_records er
+                JOIN exams e ON er.exam_id = e.id
+                JOIN users u ON er.student_id = u.id
+                WHERE er.status = 'submitted' AND er.score IS NULL
+            ''').fetchall()
 
-        # 获取待评分的考试记录
-        pending_grading = conn.execute('''
-            SELECT er.*, e.title, u.username as student_name FROM exam_records er
-            JOIN exams e ON er.exam_id = e.id
-            JOIN users u ON er.student_id = u.id
-            WHERE er.status = 'submitted' AND er.score IS NULL
-        ''').fetchall()
+            return render_template('teacher_dashboard.html', exams=exams, questions=questions, pending_grading=pending_grading)
 
-        conn.close()
-        return render_template('teacher_dashboard.html', exams=exams, questions=questions, pending_grading=pending_grading)
+        elif session['role'] == 'student':
+            # 学生视图：显示可用的考试
+            current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            user_id = session['user_id']
 
-    elif session['role'] == 'student':
-        # 学生视图：显示可用的考试
-        # ✅ 统一使用 Python 本地时间，避免 SQLite datetime('now') 的 UTC 时区陷阱
-        current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        user_id = session['user_id']
+            # === 1. 获取【正在进行】的考试 ===
+            current_exams = conn.execute(
+                '''SELECT e.id, e.title, e.subject, e.start_time, e.end_time, e.status, u.username as teacher_name
+                   FROM exams e
+                            INNER JOIN users u ON e.teacher_id = u.id
+                   WHERE e.status = 'active'
+                     AND (e.start_time IS NULL OR e.start_time <= :ct)
+                     AND (e.end_time IS NULL OR e.end_time >= :ct)
+                     AND e.id NOT IN (SELECT exam_id
+                                      FROM exam_records
+                                      WHERE student_id = :uid
+                                        AND status = 'submitted')''',
+                {"ct": current_time, "uid": user_id}
+            ).fetchall()
 
-        print(f"[DEBUG] current_time = '{current_time}'")
-        print(f"[DEBUG] type(current_time) = {type(current_time)}")
+            # === 2. 获取【即将开始】的考试 ===
+            upcoming_exams = conn.execute(
+                '''SELECT e.id, e.title, e.subject, e.start_time, e.end_time, e.status, u.username as teacher_name
+                   FROM exams e
+                            INNER JOIN users u ON e.teacher_id = u.id
+                   WHERE e.status = 'active'
+                     AND e.start_time > :ct
+                     AND e.id NOT IN (SELECT exam_id
+                                      FROM exam_records
+                                      WHERE student_id = :uid)''',
+                {"ct": current_time, "uid": user_id}
+            ).fetchall()
 
+            # === 3. 获取【历史考试记录】 ===
+            completed_exams = conn.execute(
+                '''SELECT er.*, e.title AS exam_name, u.username as teacher_name
+                   FROM exam_records er
+                            JOIN exams e ON er.exam_id = e.id
+                            JOIN users u ON e.teacher_id = u.id
+                   WHERE er.student_id = :uid
+                   ORDER BY er.id DESC''',
+                {"uid": user_id}
+            ).fetchall()
 
-        # === 1. 获取【正在进行】的考试（新增） ===
-        current_exams = conn.execute(
-            '''SELECT e.id, e.title, e.subject, e.start_time, e.end_time, e.status, u.username as teacher_name
-               FROM exams e
-                        INNER JOIN users u ON e.teacher_id = u.id
-               WHERE e.status = 'active'
-                 AND (e.start_time IS NULL OR e.start_time <= :ct)
-                 AND (e.end_time IS NULL OR e.end_time >= :ct)
-                 AND e.id NOT IN (SELECT exam_id
-                                  FROM exam_records
-                                  WHERE student_id = :uid
-                                    AND status = 'completed')''',
-            {"ct": current_time, "uid": user_id}
-        ).fetchall()
-
-        # === 2. 获取【即将开始】的考试（保持原逻辑） ===
-        upcoming_exams = conn.execute(
-            '''SELECT e.id, e.title, e.subject, e.start_time, e.end_time, e.status, u.username as teacher_name
-               FROM exams e
-                        INNER JOIN users u ON e.teacher_id = u.id
-               WHERE e.status = 'active'
-                 AND e.start_time > :ct
-                 AND e.id NOT IN (SELECT exam_id
-                                  FROM exam_records
-                                  WHERE student_id = :uid)''',
-            {"ct": current_time, "uid": user_id}
-        ).fetchall()
-
-        # === 3. 获取【历史考试记录】 ===
-        completed_exams = conn.execute(
-            '''SELECT er.*, e.title AS exam_name, u.username as teacher_name
-               FROM exam_records er
-                        JOIN exams e ON er.exam_id = e.id
-                        JOIN users u ON e.teacher_id = u.id
-               WHERE er.student_id = :uid
-               ORDER BY er.id DESC''',
-            {"uid": user_id}
-        ).fetchall()
-
-        conn.close()  # ✅ 提前关闭连接，防止资源泄漏
-
-        # === 4. 渲染模板时传入新变量 ===
-        return render_template(
-            'student_dashboard.html',
-            current_exams=current_exams,
-            upcoming_exams=upcoming_exams,
-            completed_exams=completed_exams
-        )
+            return render_template(
+                'student_dashboard.html',
+                current_exams=current_exams,
+                upcoming_exams=upcoming_exams,
+                completed_exams=completed_exams
+            )
 
 
 # 路由：教师 - 添加题目
@@ -591,27 +602,28 @@ def add_question():
             solution_code = None
         elif question_type == 'programming':
             option_a = option_b = option_c = option_d = option_e = option_f = None
-            correct_answer = ""
+            correct_answer = request.form.get('correct_answer', '')
             test_cases = request.form.get('test_cases', '[]')
             solution_code = request.form.get('solution_code', '')
         else:  # 简答题
             option_a = option_b = option_c = option_d = option_e = option_f = None
-            correct_answer = ""
+            correct_answer = request.form.get('correct_answer', '')
             test_cases = None
             solution_code = None
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        explanation = request.form.get('explanation', '')
 
-        cursor.execute('''
-            INSERT INTO questions (teacher_id, question_text, option_a, option_b, option_c, option_d, option_e, option_f, 
-                                 correct_answer, question_type, subject, difficulty, points, test_cases, solution_code)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (session['user_id'], question_text, option_a, option_b, option_c, option_d, option_e, option_f,
-              correct_answer, question_type, subject, difficulty, points, test_cases, solution_code))
+        with get_db() as conn:
+            cursor = conn.cursor()
 
-        conn.commit()
-        conn.close()
+            cursor.execute('''
+                INSERT INTO questions (teacher_id, question_text, option_a, option_b, option_c, option_d, option_e, option_f, 
+                                     correct_answer, question_type, subject, difficulty, points, test_cases, solution_code, explanation)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (session['user_id'], question_text, option_a, option_b, option_c, option_d, option_e, option_f,
+                  correct_answer, question_type, subject, difficulty, points, test_cases, solution_code, explanation))
+
+            conn.commit()
 
         flash('题目添加成功', 'success')
         return redirect(url_for('dashboard'))
@@ -649,31 +661,28 @@ def create_exam():
             dt_obj = datetime.datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
             end_time = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
 
-        conn = get_db_connection()
+        with get_db() as conn:
+            # 创建考试
+            conn.execute('''
+                INSERT INTO exams (title, subject, teacher_id, duration_minutes, start_time, end_time, anti_cheat_enabled, shuffle_questions)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (exam_name, subject, session['user_id'], duration_minutes, start_time, end_time, anti_cheat_enabled, shuffle_questions))
 
-        # 创建考试
-        conn.execute('''
-            INSERT INTO exams (title, subject, teacher_id, duration_minutes, start_time, end_time, anti_cheat_enabled, shuffle_questions)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (exam_name, subject, session['user_id'], duration_minutes, start_time, end_time, anti_cheat_enabled, shuffle_questions))
+            exam_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
 
-        exam_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+            # 添加选定的题目到考试中
+            selected_questions = request.form.getlist('questions')
+            for qid in selected_questions:
+                conn.execute('INSERT INTO exam_questions (exam_id, question_id) VALUES (?, ?)', (exam_id, qid))
 
-        # 添加选定的题目到考试中
-        selected_questions = request.form.getlist('questions')
-        for qid in selected_questions:
-            conn.execute('INSERT INTO exam_questions (exam_id, question_id) VALUES (?, ?)', (exam_id, qid))
-
-        conn.commit()
-        conn.close()
+            conn.commit()
 
         flash('考试创建成功', 'success')
         return redirect(url_for('dashboard'))
 
     # 获取教师的所有题目
-    conn = get_db_connection()
-    questions = conn.execute('SELECT * FROM questions WHERE teacher_id = ?', (session['user_id'],)).fetchall()
-    conn.close()
+    with get_db() as conn:
+        questions = conn.execute('SELECT * FROM questions WHERE teacher_id = ?', (session['user_id'],)).fetchall()
 
     return render_template('create_exam.html', questions=questions)
 
@@ -683,69 +692,61 @@ def create_exam():
 @login_required
 @role_required('student')
 def take_exam(exam_id):
-    conn = get_db_connection()
+    with get_db() as conn:
+        # 获取考试信息
+        exam = conn.execute('SELECT * FROM exams WHERE id = ?', (exam_id,)).fetchone()
+        if not exam:
+            flash('考试不存在', 'error')
+            return redirect(url_for('dashboard'))
 
-    # 获取考试信息
-    exam = conn.execute('SELECT * FROM exams WHERE id = ?', (exam_id,)).fetchone()
-    if not exam:
-        flash('考试不存在', 'error')
-        return redirect(url_for('dashboard'))
+        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # ✅ 修复：使用统一格式的字符串进行时间比较，彻底告别 fromisoformat 解析异常
-    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if exam['start_time'] and now_str < exam['start_time']:
+            flash('考试尚未开始', 'error')
+            return redirect(url_for('dashboard'))
 
-    if exam['start_time'] and now_str < exam['start_time']:
-        flash('考试尚未开始', 'error')
-        return redirect(url_for('dashboard'))
+        if exam['end_time'] and now_str > exam['end_time']:
+            flash('考试已结束', 'error')
+            return redirect(url_for('dashboard'))
 
-    if exam['end_time'] and now_str > exam['end_time']:
-        flash('考试已结束', 'error')
-        return redirect(url_for('dashboard'))
+        # 获取考试题目
+        questions_query = '''
+            SELECT q.* FROM questions q
+            JOIN exam_questions eq ON q.id = eq.question_id
+            WHERE eq.exam_id = ?
+        '''
+        params = [exam_id]
 
-    # 获取考试题目
-    questions_query = '''
-        SELECT q.* FROM questions q 
-        JOIN exam_questions eq ON q.id = eq.question_id 
-        WHERE eq.exam_id = ?
-    '''
-    params = [exam_id]
+        if exam['shuffle_questions']:
+            questions_query += ' ORDER BY RANDOM()'
+        else:
+            questions_query += ' ORDER BY q.id'
 
-    # 如果启用了随机打乱题目顺序
-    if exam['shuffle_questions']:
-        questions_query += ' ORDER BY RANDOM()'
-    else:
-        questions_query += ' ORDER BY q.id'
+        questions = conn.execute(questions_query, params).fetchall()
 
-    questions = conn.execute(questions_query, params).fetchall()
+        # 检查是否已有考试记录
+        existing_record = conn.execute('''
+            SELECT * FROM exam_records
+            WHERE exam_id = ? AND student_id = ? AND status = 'in_progress'
+        ''', (exam_id, session['user_id'])).fetchone()
 
-    # 检查是否已有考试记录
-    existing_record = conn.execute('''
-        SELECT * FROM exam_records 
-        WHERE exam_id = ? AND student_id = ? AND status = 'in_progress'
-    ''', (exam_id, session['user_id'])).fetchone()
-
-    if existing_record:
-        record_id = existing_record['id']
-    else:
-        # 创建新的考试记录
-        start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        cursor = conn.execute('''
-                              INSERT INTO exam_records (exam_id, student_id, start_time, status, anti_cheat_logs)
-                              VALUES (?, ?, ?, 'in_progress', ?)
-                              ''', (exam_id, session['user_id'], start_time, json.dumps([])))
-
-        # record_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
-        record_id = cursor.lastrowid
-
-        conn.commit()
-
-    conn.close()
+        if existing_record:
+            record_id = existing_record['id']
+        else:
+            start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            cursor = conn.execute('''
+                                  INSERT INTO exam_records (exam_id, student_id, start_time, status, anti_cheat_logs)
+                                  VALUES (?, ?, ?, 'in_progress', ?)
+                                  ''', (exam_id, session['user_id'], start_time, json.dumps([])))
+            record_id = cursor.lastrowid
+            conn.commit()
 
     return render_template('take_exam.html',
                           exam=exam,
                           questions=questions,
                           record_id=record_id,
                           anti_cheat_enabled=exam['anti_cheat_enabled'])
+
 
 
 # 路由：提交考试答案
@@ -765,151 +766,148 @@ def submit_exam(record_id):
             question_id = key.split('_')[1]
             images[question_id] = value  # Base64编码的图片数据
 
-    conn = get_db_connection()
+    with get_db() as conn:
+        # 获取考试记录
+        record = conn.execute('SELECT * FROM exam_records WHERE id = ?', (record_id,)).fetchone()
+        if not record or record['status'] != 'in_progress':
+            flash('无效的考试记录', 'error')
+            return redirect(url_for('dashboard'))
 
-    # 获取考试记录
-    record = conn.execute('SELECT * FROM exam_records WHERE id = ?', (record_id,)).fetchone()
-    if not record or record['status'] != 'in_progress':
-        flash('无效的考试记录', 'error')
-        conn.close()
-        return redirect(url_for('dashboard'))
+        # 获取考试和题目信息
+        exam = conn.execute('SELECT * FROM exams WHERE id = ?', (record['exam_id'],)).fetchone()
+        questions = conn.execute('''
+            SELECT q.* FROM questions q
+            JOIN exam_questions eq ON q.id = eq.question_id
+            WHERE eq.exam_id = ?
+        ''', (record['exam_id'],)).fetchall()
 
-    # 获取考试和题目信息
-    exam = conn.execute('SELECT * FROM exams WHERE id = ?', (record['exam_id'],)).fetchone()
-    questions = conn.execute('''
-        SELECT q.* FROM questions q 
-        JOIN exam_questions eq ON q.id = eq.question_id 
-        WHERE eq.exam_id = ?
-    ''', (record['exam_id'],)).fetchall()
+        # 计算客观题分数
+        score = 0
+        total_questions = len(questions)
+        subjective_questions = []  # 需要人工评分的题目
+        programming_questions = []  # 需要自动评测的编程题
 
-    # 计算客观题分数
-    score = 0
-    total_questions = len(questions)
-    subjective_questions = []  # 需要人工评分的题目
-    programming_questions = []  # 需要自动评测的编程题
+        for question in questions:
+            question_id = str(question['id'])
+            if question_id in answers:
+                answer = answers[question_id]
 
-    for question in questions:
-        question_id = str(question['id'])
-        if question_id in answers:
-            answer = answers[question_id]
+                # 根据题型判断答案是否正确
+                if question['question_type'] in ['multiple_choice', 'true_false']:
+                    if is_answer_correct(answer, question['correct_answer'], question['question_type']):
+                        score += question['points']
+                elif question['question_type'] == 'multiple_select':
+                    student_answers_set = set(answer.upper().split(',')) if answer else set()
+                    correct_answers_set = set(question['correct_answer'].upper().split(','))
+                    if student_answers_set == correct_answers_set:
+                        score += question['points']
+                elif question['question_type'] == 'programming':
+                    # 编程题：先进行自动评测，再人工评分
+                    if question['test_cases']:  # 如果有测试用例
+                        passed, total_tests = evaluate_programming_solution(
+                            answer, question['test_cases'], question['solution_code']
+                        )
+                        auto_score = int((passed / total_tests) * question['points']) if total_tests > 0 else 0
 
-            # 根据题型判断答案是否正确
-            if question['question_type'] in ['multiple_choice', 'true_false']:
-                if is_answer_correct(answer, question['correct_answer'], question['question_type']):
-                    score += question['points']
-            elif question['question_type'] == 'multiple_select':
-                student_answers = set(answer.upper().split(',')) if answer else set()
-                correct_answers = set(question['correct_answer'].upper().split(','))
-                if student_answers == correct_answers:
-                    score += question['points']
-            elif question['question_type'] == 'programming':
-                # 编程题：先进行自动评测，再人工评分
-                if question['test_cases']:  # 如果有测试用例
-                    passed, total_tests = evaluate_programming_solution(
-                        answer, question['test_cases'], question['solution_code']
+                        programming_questions.append({
+                            'question_id': question['id'],
+                            'answer': answer,
+                            'auto_score': auto_score,
+                            'max_score': question['points']
+                        })
+                    else:
+                        # 没有测试用例的编程题需要人工评分
+                        subjective_questions.append({
+                            'question_id': question['id'],
+                            'answer': answer,
+                            'points': question['points']
+                        })
+                elif question['question_type'] == 'short_answer':
+                    student_answer = answers.get(question_id, "")
+
+                    # 如果学生没写，给0分并记录
+                    if not student_answer.strip():
+                        conn.execute('''
+                            INSERT INTO grading_records
+                            (exam_record_id, question_id, student_answer, teacher_score, max_score, grader_id)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (record_id, question['id'], '', 0, question['points'], -1))
+                        continue
+
+                    # --- 调用 AI 进行实时评分 ---
+                    standard_hint = question['correct_answer']
+
+                    ai_raw_score, ai_comment = grade_short_answer_ai(
+                        question['question_text'],
+                        standard_hint,
+                        student_answer
                     )
-                    auto_score = int((passed / total_tests) * question['points']) if total_tests > 0 else 0
 
-                    programming_questions.append({
-                        'question_id': question['id'],
-                        'answer': answer,
-                        'auto_score': auto_score,
-                        'max_score': question['points']
-                    })
-                else:
-                    # 没有测试用例的编程题需要人工评分
-                    subjective_questions.append({
-                        'question_id': question['id'],
-                        'answer': answer,
-                        'points': question['points']
-                    })
-            elif question['question_type'] == 'short_answer':
-                student_answer = answers.get(question_id, "")
+                    max_points = question['points']
 
-                # 如果学生没写，给0分
-                if not student_answer.strip():
-                    # 依然存入记录，标记为 AI 评0分
-                    conn.execute(''' INSERT INTO grading_records ... ''')
-                    continue
+                    # 如果 AI 评分失败（返回 None），标记为待人工评分
+                    if ai_raw_score is None:
+                        subjective_questions.append({
+                            'question_id': question['id'],
+                            'answer': student_answer,
+                            'points': question['points']
+                        })
+                        continue
 
-                # --- 调用 AI 进行实时评分 ---
-                # 注意：standard_answer 字段里存的是“得分点关键词”
-                standard_hint = question['correct_answer']
+                    # 将 0-10 的分数映射到该题的实际分值
+                    actual_score = int((ai_raw_score / 10) * max_points)
+                    score += actual_score
 
-                ai_raw_score, ai_comment = grade_short_answer_ai(
-                    question['question_text'],
-                    standard_hint,
-                    student_answer
-                )
+                    # 存入数据库，标记为 AI 评分（grader_id=-1 代表 AI）
+                    conn.execute(
+                        '''
+                            INSERT INTO grading_records
+                            (exam_record_id, question_id, student_answer, teacher_score, max_score, grader_id)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (record_id, question['id'], student_answer, actual_score, max_points, -1))
 
-                # 将 0-10 的分数映射到该题的实际分值
-                # 例如该题 5 分，AI 打了 8 分（满分10），则实际得分 = 8/10 * 5 = 4
-                max_points = question['points']
-                actual_score = int((ai_raw_score / 10) * max_points)
+        # 更新考试记录
+        submit_time = datetime.datetime.now()
 
-                # 累加到总分
-                score += actual_score
+        # 如果有主观题或编程题需要人工评分，分数暂时设为None
+        has_manual_grading = bool(subjective_questions or any(q['auto_score'] < q['max_score'] for q in programming_questions))
+        final_score = score if not has_manual_grading else None
 
-                # 存入数据库，标记为 AI 评分
-                conn.execute(
-                    '''
-                        INSERT INTO grading_records 
-                        (exam_record_id, question_id, student_answer, teacher_score, max_score, grader_id) 
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''',(record_id, question['id'], student_answer, actual_score, max_points, -1))
-                # -1 代表 AI
-
-
-                # 人工评分简答题
-                # subjective_questions.append({
-                #     'question_id': question['id'],
-                #     'answer': answer,
-                #     'points': question['points']
-                # })
-
-    # 更新考试记录
-    submit_time = datetime.datetime.now()
-
-    # 如果有主观题或编程题需要人工评分，分数暂时设为None
-    has_manual_grading = bool(subjective_questions or any(q['auto_score'] < q['max_score'] for q in programming_questions))
-    final_score = score if not has_manual_grading else None
-
-    conn.execute('''
-        UPDATE exam_records 
-        SET submit_time = ?, score = ?, total_questions = ?, answers = ?, status = 'submitted'
-        WHERE id = ?
-    ''', (submit_time, final_score, total_questions, json.dumps(answers), record_id))
-
-    # 保存主观题和编程题答案以供后续评分
-    for subj_q in subjective_questions:
         conn.execute('''
-            INSERT INTO grading_records (exam_record_id, question_id, student_answer, max_score)
-            VALUES (?, ?, ?, ?)
-        ''', (record_id, subj_q['question_id'], subj_q['answer'], subj_q['points']))
+            UPDATE exam_records
+            SET submit_time = ?, score = ?, total_questions = ?, answers = ?, status = 'submitted'
+            WHERE id = ?
+        ''', (submit_time, final_score, total_questions, json.dumps(answers), record_id))
 
-    for prog_q in programming_questions:
-        conn.execute('''
-            INSERT INTO grading_records (exam_record_id, question_id, student_answer, auto_score, max_score)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (record_id, prog_q['question_id'], prog_q['answer'], prog_q['auto_score'], prog_q['max_score']))
-
-    # 保存图片附件
-    for qid, img_data in images.items():
-        if img_data:
-            # 解码Base64图片数据
-            header, encoded = img_data.split(',', 1)
-            image_data = base64.b64decode(encoded)
-
-            # 生成唯一文件名
-            filename = f"{secrets.token_hex(8)}.png"
-
+        # 保存主观题和编程题答案以供后续评分
+        for subj_q in subjective_questions:
             conn.execute('''
-                INSERT INTO image_attachments (question_id, exam_record_id, filename, data)
+                INSERT INTO grading_records (exam_record_id, question_id, student_answer, max_score)
                 VALUES (?, ?, ?, ?)
-            ''', (qid, record_id, filename, image_data))
+            ''', (record_id, subj_q['question_id'], subj_q['answer'], subj_q['points']))
 
-    conn.commit()
-    conn.close()
+        for prog_q in programming_questions:
+            conn.execute('''
+                INSERT INTO grading_records (exam_record_id, question_id, student_answer, auto_score, max_score)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (record_id, prog_q['question_id'], prog_q['answer'], prog_q['auto_score'], prog_q['max_score']))
+
+        # 保存图片附件
+        for qid, img_data in images.items():
+            if img_data:
+                # 解码Base64图片数据
+                header, encoded = img_data.split(',', 1)
+                image_data = base64.b64decode(encoded)
+
+                # 生成唯一文件名
+                filename = f"{secrets.token_hex(8)}.png"
+
+                conn.execute('''
+                    INSERT INTO image_attachments (question_id, exam_record_id, filename, data)
+                    VALUES (?, ?, ?, ?)
+                ''', (qid, record_id, filename, image_data))
+
+        conn.commit()
 
     # 准备反馈消息
     feedback_parts = []
@@ -929,8 +927,6 @@ def submit_exam(record_id):
     else:
         flash(f'考试提交成功！您的得分是 {score} 分', 'success')
 
-    # return redirect(url_for('dashboard'))
-    # 【修改点】不再返回 dashboard，而是跳转到专属的结果解析页
     return redirect(url_for('view_exam_result', record_id=record_id))
 
 
@@ -939,59 +935,75 @@ def submit_exam(record_id):
 @login_required
 @role_required('student')
 def view_exam_result(record_id):
-    conn = get_db_connection()
+    with get_db() as conn:
+        # 【安全校验】强制绑定当前登录用户 ID，防止越权访问
+        record = conn.execute(
+            'SELECT * FROM exam_records WHERE id = ? AND student_id = ?',
+            (record_id, session['user_id'])
+        ).fetchone()
 
-    # 【安全校验】强制绑定当前登录用户 ID，防止越权访问
-    record = conn.execute(
-        'SELECT * FROM exam_records WHERE id = ? AND student_id = ?',
-        (record_id, session['user_id'])
-    ).fetchone()
+        if not record:
+            flash('未找到考试记录或无权访问', 'error')
+            return redirect(url_for('dashboard'))
 
-    if not record:
-        flash('未找到考试记录或无权访问', 'error')
-        conn.close()
-        return redirect(url_for('dashboard'))
+        student_answers = json.loads(record['answers']) if record['answers'] else {}
 
-    student_answers = json.loads(record['answers']) if record['answers'] else {}
+        # 获取考试信息，判断是否可以查看解析
+        exam = conn.execute('SELECT status, end_time FROM exams WHERE id = ?', (record['exam_id'],)).fetchone()
+        show_explanation = False
+        if exam:
+            # 老师已停止考试（状态为 inactive）
+            if exam['status'] == 'inactive':
+                show_explanation = True
+            # 考试结束时间已过
+            elif exam['end_time']:
+                now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                if now_str >= exam['end_time']:
+                    show_explanation = True
 
-    # 获取题目详情及解析
-    questions = conn.execute('''
-                             SELECT q.id,
-                                    q.question_text,
-                                    q.question_type,
-                                    q.options,
-                                    q.correct_answer,
-                                    q.explanation,
-                                    q.points
-                             FROM exam_questions eq
-                                      JOIN questions q ON eq.question_id = q.id
-                             WHERE eq.exam_id = ?
-                             ORDER BY eq.id
-                             ''', (record['exam_id'],)).fetchall()
+        # 获取题目详情（含编程题参考答案）
+        questions = conn.execute('''
+                                 SELECT q.id,
+                                        q.question_text,
+                                        q.question_type,
+                                        q.option_a,
+                                        q.option_b,
+                                        q.option_c,
+                                        q.option_d,
+                                        q.option_e,
+                                        q.option_f,
+                                        q.correct_answer,
+                                        q.points,
+                                        q.solution_code,
+                                        q.explanation
+                                 FROM exam_questions eq
+                                          JOIN questions q ON eq.question_id = q.id
+                                 WHERE eq.exam_id = ?
+                                 ORDER BY eq.id
+                                 ''', (record['exam_id'],)).fetchall()
 
-    # 【关键增强】获取主观题/编程题的评分记录（含AI评语/得分）
-    grading_map = {}
-    subjective_ids = [q['id'] for q in questions if q['question_type'] in ('short_answer', 'programming')]
-    if subjective_ids:
-        placeholders = ','.join(['?'] * len(subjective_ids))
-        gradings = conn.execute(f'''
-            SELECT question_id, teacher_score, max_score, grader_id 
-            FROM grading_records 
-            WHERE exam_record_id = ? AND question_id IN ({placeholders})
-        ''', [record_id] + subjective_ids).fetchall()
+        # 获取主观题/编程题的评分记录
+        grading_map = {}
+        subjective_ids = [q['id'] for q in questions if q['question_type'] in ('short_answer', 'programming')]
+        if subjective_ids:
+            placeholders = ','.join(['?'] * len(subjective_ids))
+            gradings = conn.execute(f'''
+                SELECT question_id, teacher_score, max_score, grader_id
+                FROM grading_records
+                WHERE exam_record_id = ? AND question_id IN ({placeholders})
+            ''', [record_id] + subjective_ids).fetchall()
 
-        for g in gradings:
-            grading_map[g['question_id']] = dict(g)
+            for g in gradings:
+                grading_map[g['question_id']] = dict(g)
 
-    conn.close()
-
-    return render_template(
-        'exam_result.html',
-        record=record,
-        questions=questions,
-        student_answers=student_answers,
-        grading_map=grading_map
-    )
+        return render_template(
+            'exam_result.html',
+            record=record,
+            questions=questions,
+            student_answers=student_answers,
+            grading_map=grading_map,
+            show_explanation=show_explanation
+        )
 
 
 # 路由：处理防作弊事件
@@ -1014,20 +1026,15 @@ def cheating_detected(record_id):
 @login_required
 @role_required('teacher')
 def exam_results(exam_id):
-    conn = get_db_connection()
+    with get_db() as conn:
+        exam = conn.execute('SELECT * FROM exams WHERE id = ?', (exam_id,)).fetchone()
 
-    # 获取考试信息
-    exam = conn.execute('SELECT * FROM exams WHERE id = ?', (exam_id,)).fetchone()
-
-    # 获取考试结果
-    results = conn.execute('''
-        SELECT er.*, u.username as student_name FROM exam_records er
-        JOIN users u ON er.student_id = u.id
-        WHERE er.exam_id = ? AND er.status = 'submitted'
-        ORDER BY er.score DESC NULLS LAST
-    ''', (exam_id,)).fetchall()
-
-    conn.close()
+        results = conn.execute('''
+            SELECT er.*, u.username as student_name FROM exam_records er
+            JOIN users u ON er.student_id = u.id
+            WHERE er.exam_id = ? AND er.status = 'submitted'
+            ORDER BY er.score DESC NULLS LAST
+        ''', (exam_id,)).fetchall()
 
     if results:
         max_score = max(r.score for r in results) if results else 0
@@ -1050,77 +1057,84 @@ def exam_results(exam_id):
 def grade_subjective_questions():
     if request.method == 'POST':
         # 处理评分提交
-        conn = get_db_connection()
+        with get_db() as conn:
+            for key, value in request.form.items():
+                if key.startswith('score_'):
+                    grading_record_id = key.split('_')[1]
+                    score = int(value)
 
-        for key, value in request.form.items():
-            if key.startswith('score_'):
-                grading_record_id = key.split('_')[1]
-                score = int(value)
+                    # 更新评分记录
+                    conn.execute('''
+                        UPDATE grading_records
+                        SET teacher_score = ?, grader_id = ?
+                        WHERE id = ?
+                    ''', (score, session['user_id'], grading_record_id))
 
-                # 更新评分记录
+            # 计算每个考试记录的最终分数
+            # 获取所有已完成评分的考试记录
+            completed_gradings = conn.execute('''
+                SELECT gr.exam_record_id, SUM(COALESCE(gr.teacher_score, gr.auto_score, 0)) as subjective_score
+                FROM grading_records gr
+                WHERE gr.teacher_score IS NOT NULL OR gr.auto_score IS NOT NULL
+                GROUP BY gr.exam_record_id
+            ''').fetchall()
+
+            for record in completed_gradings:
+                exam_record_id = record['exam_record_id']
+
+                # 修复：计算客观题的实际得分（而非题目总分）
+                # 1. 获取学生的答案
+                exam_record = conn.execute(
+                    'SELECT answers FROM exam_records WHERE id = ?', (exam_record_id,)
+                ).fetchone()
+                student_answers = json.loads(exam_record['answers']) if exam_record['answers'] else {}
+
+                # 2. 获取客观题题目及正确答案
+                objective_questions = conn.execute('''
+                    SELECT q.id, q.correct_answer, q.question_type, q.points
+                    FROM exam_questions eq
+                    JOIN questions q ON eq.question_id = q.id
+                    JOIN exams e ON eq.exam_id = e.id
+                    WHERE e.id = (SELECT exam_id FROM exam_records WHERE id = ?)
+                      AND q.question_type IN ('multiple_choice', 'multiple_select', 'true_false')
+                ''', (exam_record_id,)).fetchall()
+
+                # 3. 计算客观题实际得分
+                objective_score = 0
+                for q in objective_questions:
+                    qid_str = str(q['id'])
+                    if qid_str in student_answers:
+                        student_answer = student_answers[qid_str]
+                        if is_answer_correct(student_answer, q['correct_answer'], q['question_type']):
+                            objective_score += q['points']
+
+                # 总分 = 客观题实际得分 + 主观题评分
+                total_score = objective_score + (record['subjective_score'] or 0)
+
+                # 更新考试记录的总分
                 conn.execute('''
-                    UPDATE grading_records 
-                    SET teacher_score = ?, grader_id = ?
+                    UPDATE exam_records
+                    SET score = ?
                     WHERE id = ?
-                ''', (score, session['user_id'], grading_record_id))
+                ''', (total_score, exam_record_id))
 
-        # 计算每个考试记录的最终分数
-        # 获取所有已完成评分的考试记录
-        completed_gradings = conn.execute('''
-            SELECT gr.exam_record_id, SUM(COALESCE(gr.teacher_score, gr.auto_score, 0)) as subjective_score
-            FROM grading_records gr
-            WHERE gr.teacher_score IS NOT NULL OR gr.auto_score IS NOT NULL
-            GROUP BY gr.exam_record_id
-        ''').fetchall()
-
-        for record in completed_gradings:
-            exam_record_id = record['exam_record_id']
-
-            # 计算客观题分数
-            objective_data = conn.execute(
-        '''
-                SELECT SUM(q.points) as objective_score
-                FROM exam_records er
-                JOIN exams e ON er.exam_id = e.id
-                JOIN exam_questions eq ON e.id = eq.exam_id
-                JOIN questions q ON eq.question_id = q.id
-                WHERE er.id = ? AND q.question_type IN ('multiple_choice', 'multiple_select', 'true_false')
-            ''', (exam_record_id,)).fetchone()
-
-            objective_score = objective_data['objective_score'] or 0
-
-            # 总分 = 客观题分数 + 主观题分数
-            total_score = objective_score + (record['subjective_score'] or 0)
-
-            # 更新考试记录的总分
-            conn.execute('''
-                UPDATE exam_records 
-                SET score = ?
-                WHERE id = ?
-            ''', (total_score, exam_record_id))
-
-        conn.commit()
-        conn.close()
+            conn.commit()
 
         flash('评分提交成功！', 'success')
         return redirect(url_for('dashboard'))
 
     # 显示待评分的题目
-    conn = get_db_connection()
-
-    # 获取需要评分的记录
-    records_to_grade = conn.execute('''
-        SELECT gr.*, q.question_text, u.username as student_name, e.title
-        FROM grading_records gr
-        JOIN questions q ON gr.question_id = q.id
-        JOIN exam_records er ON gr.exam_record_id = er.id
-        JOIN exams e ON er.exam_id = e.id
-        JOIN users u ON er.student_id = u.id
-        WHERE gr.teacher_score IS NULL
-        ORDER BY e.id, u.username
-    ''').fetchall()
-
-    conn.close()
+    with get_db() as conn:
+        records_to_grade = conn.execute('''
+            SELECT gr.*, q.question_text, u.username as student_name, e.title
+            FROM grading_records gr
+            JOIN questions q ON gr.question_id = q.id
+            JOIN exam_records er ON gr.exam_record_id = er.id
+            JOIN exams e ON er.exam_id = e.id
+            JOIN users u ON er.student_id = u.id
+            WHERE gr.teacher_score IS NULL
+            ORDER BY e.id, u.username
+        ''').fetchall()
 
     return render_template('grade_subjective_questions.html', records_to_grade=records_to_grade)
 
@@ -1129,9 +1143,8 @@ def grade_subjective_questions():
 @app.route('/image_attachment/<int:attachment_id>')
 @login_required
 def get_image_attachment(attachment_id):
-    conn = get_db_connection()
-    attachment = conn.execute('SELECT * FROM image_attachments WHERE id = ?', (attachment_id,)).fetchone()
-    conn.close()
+    with get_db() as conn:
+        attachment = conn.execute('SELECT * FROM image_attachments WHERE id = ?', (attachment_id,)).fetchone()
 
     if not attachment:
         return '', 404
@@ -1153,22 +1166,105 @@ def ai_generate():
         topic = request.form['topic']
         difficulty = request.form['difficulty']
         num = int(request.form['num'])
+        question_type = request.form.get('question_type', 'multiple_choice')
 
-        # 优化 Prompt：明确要求字段名
-        prompt = f"""
-        你是一个出题助手。请生成 {num} 道关于 '{topic}' 的 {difficulty} 难度的单选题。
-        请严格遵守以下 JSON 格式，不要包含 Markdown 代码块标记（```），不要包含任何解释性文字：
-        [
-            {{
-                "question_text": "题目内容（如果有数学公式，请用普通文本描述，不要使用 LaTeX 括号）",
-                "option_a": "选项A内容",
-                "option_b": "选项B内容",
-                "option_c": "选项C内容",
-                "option_d": "选项D内容",
-                "correct_answer": "A"
-            }}
-        ]
-        """
+        # 题型中文名映射
+        type_names = {
+            'multiple_choice': '单选题',
+            'multiple_select': '多选题',
+            'true_false': '判断题',
+            'short_answer': '简答题',
+            'programming': '编程题'
+        }
+        type_name = type_names.get(question_type, '单选题')
+
+        # 根据题型构建不同的 Prompt
+        if question_type == 'multiple_choice':
+            prompt = f"""
+            你是一个出题助手。请生成 {num} 道关于 '{topic}' 的 {difficulty} 难度的单选题。
+            请严格遵守以下 JSON 格式，不要包含 Markdown 代码块标记，不要包含任何解释性文字：
+            [
+                {{
+                    "question_text": "题目内容",
+                    "option_a": "选项A内容",
+                    "option_b": "选项B内容",
+                    "option_c": "选项C内容",
+                    "option_d": "选项D内容",
+                    "correct_answer": "A",
+                    "explanation": "详细解析，包括正确答案分析、错误选项分析和知识点补充"
+                }}
+            ]
+            """
+        elif question_type == 'multiple_select':
+            prompt = f"""
+            你是一个出题助手。请生成 {num} 道关于 '{topic}' 的 {difficulty} 难度的多选题（有多个正确答案）。
+            请严格遵守以下 JSON 格式，不要包含 Markdown 代码块标记，不要包含任何解释性文字：
+            [
+                {{
+                    "question_text": "题目内容",
+                    "option_a": "选项A内容",
+                    "option_b": "选项B内容",
+                    "option_c": "选项C内容",
+                    "option_d": "选项D内容",
+                    "option_e": "选项E内容（如果没有E选项则留空）",
+                    "option_f": "选项F内容（如果没有F选项则留空）",
+                    "correct_answer": "A,B,C",
+                    "explanation": "详细解析，包括各选项对错分析和知识点补充"
+                }}
+            ]
+            """
+        elif question_type == 'true_false':
+            prompt = f"""
+            你是一个出题助手。请生成 {num} 道关于 '{topic}' 的 {difficulty} 难度的判断题。
+            请严格遵守以下 JSON 格式，不要包含 Markdown 代码块标记，不要包含任何解释性文字：
+            [
+                {{
+                    "question_text": "判断题题目内容（陈述一个观点或事实）",
+                    "correct_answer": "A",
+                    "explanation": "详细解析，说明为什么该陈述正确或错误，以及相关知识点"
+                }}
+            ]
+            注意：correct_answer 只能是 "A"（正确）或 "B"（错误）。
+            """
+        elif question_type == 'short_answer':
+            prompt = f"""
+            你是一个出题助手。请生成 {num} 道关于 '{topic}' 的 {difficulty} 难度的简答题。
+            请严格遵守以下 JSON 格式，不要包含 Markdown 代码块标记，不要包含任何解释性文字：
+            [
+                {{
+                    "question_text": "简答题题目内容",
+                    "correct_answer": "参考答案（详细的标准答案，包含得分要点）",
+                    "explanation": "答题思路分析、得分要点说明和相关知识点补充"
+                }}
+            ]
+            """
+        elif question_type == 'programming':
+            prompt = f"""
+            你是一个出题助手。请生成 {num} 道关于 '{topic}' 的 {difficulty} 难度的Python编程题。
+            请严格遵守以下 JSON 格式，不要包含 Markdown 代码块标记，不要包含任何解释性文字：
+            [
+                {{
+                    "question_text": "编程题题目描述，包括功能要求和输入输出说明",
+                    "test_cases": "[{{\"input\": \"输入数据\", \"expected_output\": \"期望输出\"}}]",
+                    "solution_code": "def solution():\n    # 参考答案代码\n    pass",
+                    "correct_answer": "参考答案代码",
+                    "explanation": "解题思路、算法分析、代码要点和易错点"
+                }}
+            ]
+            注意：test_cases 是一个 JSON 数组字符串，每个元素包含 input 和 expected_output。
+            """
+        else:
+            prompt = f"""
+            你是一个出题助手。请生成 {num} 道关于 '{topic}' 的 {difficulty} 难度的题目。
+            请严格遵守以下 JSON 格式，不要包含 Markdown 代码块标记：
+            [
+                {{
+                    "question_text": "题目内容",
+                    "correct_answer": "正确答案",
+                    "explanation": "详细解析"
+                }}
+            ]
+            """
 
         try:
             response = dashscope.Generation.call(model='qwen-max', prompt=prompt)
@@ -1183,47 +1279,86 @@ def ai_generate():
                 raw_text = raw_text[:-3]
             raw_text = raw_text.strip()
 
-            # 2. 直接解析 JSON (不再使用正则修复，避免误伤数学符号)
+            # 2. 直接解析 JSON
             questions_list = json.loads(raw_text)
 
             # 3. 存入数据库
-            conn = get_db_connection()
             success_count = 0
+            with get_db() as conn:
+                for q in questions_list:
+                    q_text = q.get('question_text', q.get('question', ''))
+                    explanation = q.get('explanation', '')
+                    correct_ans = q.get('correct_answer', q.get('answer', ''))
 
-            for q in questions_list:
-                # 兼容处理：检查 key 是否存在
-                # 如果 AI 还是返回了 'options' 列表，我们需要拆分它（可选，视情况而定）
-                # 这里我们强制要求 AI 返回拆分好的字段，所以直接取值
+                    if question_type == 'multiple_choice':
+                        conn.execute('''
+                            INSERT INTO questions
+                            (teacher_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, subject, difficulty, points, explanation)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                        ''', (session['user_id'], q_text,
+                              q.get('option_a', ''), q.get('option_b', ''),
+                              q.get('option_c', ''), q.get('option_d', ''),
+                              correct_ans, question_type, topic, difficulty, explanation))
 
-                conn.execute('''
-                    INSERT INTO questions
-                    (teacher_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, subject, difficulty, points)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'multiple_choice', ?, ?, 1)
-                ''', (
-                    session['user_id'],
-                    q.get('question_text', q.get('question', '')), # 兼容两种 key
-                    q.get('option_a', ''),
-                    q.get('option_b', ''),
-                    q.get('option_c', ''),
-                    q.get('option_d', ''),
-                    q.get('correct_answer', q.get('answer', '')), # 兼容两种 key
-                    topic,
-                    difficulty
-                ))
-                success_count += 1
+                    elif question_type == 'multiple_select':
+                        conn.execute('''
+                            INSERT INTO questions
+                            (teacher_id, question_text, option_a, option_b, option_c, option_d, option_e, option_f, correct_answer, question_type, subject, difficulty, points, explanation)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                        ''', (session['user_id'], q_text,
+                              q.get('option_a', ''), q.get('option_b', ''),
+                              q.get('option_c', ''), q.get('option_d', ''),
+                              q.get('option_e', ''), q.get('option_f', ''),
+                              correct_ans, question_type, topic, difficulty, explanation))
 
-            conn.commit()
-            conn.close()
-            flash(f'成功生成并导入 {success_count} 道题目！')
+                    elif question_type == 'true_false':
+                        conn.execute('''
+                            INSERT INTO questions
+                            (teacher_id, question_text, option_a, option_b, correct_answer, question_type, subject, difficulty, points, explanation)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                        ''', (session['user_id'], q_text,
+                              '正确', '错误',
+                              correct_ans, question_type, topic, difficulty, explanation))
+
+                    elif question_type == 'short_answer':
+                        conn.execute('''
+                            INSERT INTO questions
+                            (teacher_id, question_text, correct_answer, question_type, subject, difficulty, points, explanation)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                        ''', (session['user_id'], q_text,
+                              correct_ans, question_type, topic, difficulty, explanation))
+
+                    elif question_type == 'programming':
+                        test_cases = q.get('test_cases', '[]')
+                        solution_code = q.get('solution_code', correct_ans)
+                        conn.execute('''
+                            INSERT INTO questions
+                            (teacher_id, question_text, correct_answer, question_type, subject, difficulty, points, test_cases, solution_code, explanation)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                        ''', (session['user_id'], q_text,
+                              correct_ans, question_type, topic, difficulty,
+                              test_cases, solution_code, explanation))
+
+                    else:
+                        conn.execute('''
+                            INSERT INTO questions
+                            (teacher_id, question_text, correct_answer, question_type, subject, difficulty, points, explanation)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                        ''', (session['user_id'], q_text,
+                              correct_ans, question_type, topic, difficulty, explanation))
+
+                    success_count += 1
+
+                conn.commit()
+            flash(f'成功生成并导入 {success_count} 道{type_name}！')
 
         except json.JSONDecodeError as e:
-            # 专门捕获 JSON 错误，打印出来方便调试
-            print(f"JSON 解析错误: {e}")
-            print(f"AI 原始输出: {raw_text}")
+            logger.error(f"JSON 解析错误: {e}")
+            logger.error(f"AI 原始输出: {raw_text}")
             flash(f'AI 生成失败: JSON格式错误。请检查控制台日志。')
 
         except Exception as e:
-            print(f"其他错误: {e}")
+            logger.error(f"其他错误: {e}")
             flash(f'AI 生成失败: {str(e)}')
 
     return render_template('ai_generate.html')
@@ -1234,57 +1369,115 @@ def ai_generate():
 @login_required
 @role_required('teacher')
 def manage_questions():
-    """教师管理题库页面"""
-    conn = get_db_connection()
-    # 查询当前教师的所有题目
-    questions = conn.execute(
-        'SELECT * FROM questions WHERE teacher_id = ? ORDER BY id DESC',
-        (session['user_id'],)
-    ).fetchall()
-    conn.close()
-    return render_template('manage_questions.html', questions=questions)
+    """教师管理题库页面，支持按专业课和题型筛选"""
+    # 获取筛选参数
+    filter_subject = request.args.get('subject', '')
+    filter_type = request.args.get('question_type', '')
+
+    with get_db() as conn:
+        # 查询当前教师所有不同的专业课（用于筛选下拉框）
+        subjects = conn.execute(
+            'SELECT DISTINCT subject FROM questions WHERE teacher_id = ? AND subject IS NOT NULL AND subject != "" ORDER BY subject',
+            (session['user_id'],)
+        ).fetchall()
+
+        # 构建带筛选的查询
+        query = 'SELECT * FROM questions WHERE teacher_id = ?'
+        params = [session['user_id']]
+
+        if filter_subject:
+            query += ' AND subject = ?'
+            params.append(filter_subject)
+        if filter_type:
+            query += ' AND question_type = ?'
+            params.append(filter_type)
+
+        query += ' ORDER BY id DESC'
+        questions = conn.execute(query, params).fetchall()
+
+    return render_template('manage_questions.html',
+                           questions=questions,
+                           subjects=subjects,
+                           filter_subject=filter_subject,
+                           filter_type=filter_type)
 
 
 @app.route('/edit_question/<int:question_id>', methods=['GET', 'POST'])
 @login_required
 @role_required('teacher')
 def edit_question(question_id):
-    """编辑题目"""
-    conn = get_db_connection()
+    """编辑题目，支持所有题型"""
+    with get_db() as conn:
+        question = conn.execute('SELECT * FROM questions WHERE id = ?', (question_id,)).fetchone()
+        if not question:
+            flash('❌ 题目不存在！', 'error')
+            return redirect(url_for('manage_questions'))
+        if question['teacher_id'] != session['user_id']:
+            flash('❌ 您没有权限编辑此题目！', 'error')
+            return redirect(url_for('manage_questions'))
 
     if request.method == 'POST':
         question_text = request.form['question_text']
-        option_a = request.form['option_a']
-        option_b = request.form['option_b']
-        option_c = request.form['option_c']
-        option_d = request.form['option_d']
-        correct_answer = request.form['correct_answer']
         subject = request.form['subject']
         difficulty = request.form['difficulty']
+        explanation = request.form.get('explanation', '')
+        q_type = question['question_type']
 
-        conn.execute('''
-                     UPDATE questions
-                     SET question_text=?,
-                         option_a=?,
-                         option_b=?,
-                         option_c=?,
-                         option_d=?,
-                         correct_answer=?,
-                         subject=?,
-                         difficulty=?
-                     WHERE id = ?
-                     ''', (question_text, option_a, option_b, option_c, option_d, correct_answer, subject, difficulty,
-                           question_id))
-        conn.commit()
-        conn.close()
+        if q_type in ['multiple_choice', 'multiple_select', 'true_false']:
+            option_a = request.form.get('option_a', '')
+            option_b = request.form.get('option_b', '')
+            option_c = request.form.get('option_c', '')
+            option_d = request.form.get('option_d', '')
+            option_e = request.form.get('option_e', '')
+            option_f = request.form.get('option_f', '')
+            correct_answer = request.form.get('correct_answer', '')
+            test_cases = question['test_cases']
+            solution_code = question['solution_code']
+        elif q_type == 'programming':
+            option_a = question['option_a']
+            option_b = question['option_b']
+            option_c = question['option_c']
+            option_d = question['option_d']
+            option_e = question['option_e']
+            option_f = question['option_f']
+            correct_answer = request.form.get('correct_answer', '')
+            test_cases = request.form.get('test_cases', '[]')
+            solution_code = request.form.get('solution_code', '')
+        else:  # short_answer
+            option_a = question['option_a']
+            option_b = question['option_b']
+            option_c = question['option_c']
+            option_d = question['option_d']
+            option_e = question['option_e']
+            option_f = question['option_f']
+            correct_answer = request.form.get('correct_answer', '')
+            test_cases = question['test_cases']
+            solution_code = question['solution_code']
+
+        with get_db() as conn:
+            conn.execute('''
+                         UPDATE questions
+                         SET question_text=?,
+                             option_a=?,
+                             option_b=?,
+                             option_c=?,
+                             option_d=?,
+                             option_e=?,
+                             option_f=?,
+                             correct_answer=?,
+                             subject=?,
+                             difficulty=?,
+                             test_cases=?,
+                             solution_code=?,
+                             explanation=?
+                         WHERE id = ?
+                         ''', (question_text, option_a, option_b, option_c, option_d, option_e, option_f,
+                               correct_answer, subject, difficulty, test_cases, solution_code, explanation,
+                               question_id))
+            conn.commit()
         flash('✅ 题目已更新！', 'success')
         return redirect(url_for('manage_questions'))
 
-    question = conn.execute('SELECT * FROM questions WHERE id = ?', (question_id,)).fetchone()
-    conn.close()
-    if not question:
-        flash('❌ 题目不存在！', 'error')
-        return redirect(url_for('manage_questions'))
     return render_template('edit_question.html', question=question)
 
 
@@ -1292,12 +1485,187 @@ def edit_question(question_id):
 @login_required
 @role_required('teacher')
 def delete_question(question_id):
-    """删除题目"""
-    conn = get_db_connection()
-    conn.execute('DELETE FROM questions WHERE id = ?', (question_id,))
-    conn.commit()
-    conn.close()
-    flash('❌ 题目已删除！', 'success')
+    """删除题目（仅允许删除自己创建的题目）"""
+    with get_db() as conn:
+        # 所有权校验：只能删除自己创建的题目
+        question = conn.execute('SELECT teacher_id FROM questions WHERE id = ?', (question_id,)).fetchone()
+        if not question:
+            flash('题目不存在！', 'error')
+            return redirect(url_for('manage_questions'))
+        if question['teacher_id'] != session['user_id']:
+            flash('您没有权限删除此题目！', 'error')
+            return redirect(url_for('manage_questions'))
+        conn.execute('DELETE FROM questions WHERE id = ?', (question_id,))
+        conn.commit()
+    flash('题目已删除！', 'success')
+    return redirect(url_for('manage_questions'))
+
+
+# 路由：AI 生成试题解析
+@app.route('/generate_explanation/<int:question_id>', methods=['POST'])
+@login_required
+@role_required('teacher')
+def generate_explanation(question_id):
+    """调用 AI 为指定题目生成解析"""
+    with get_db() as conn:
+        question = conn.execute('SELECT * FROM questions WHERE id = ?', (question_id,)).fetchone()
+        if not question:
+            flash('题目不存在！', 'error')
+            return redirect(url_for('manage_questions'))
+        if question['teacher_id'] != session['user_id']:
+            flash('您没有权限操作此题目！', 'error')
+            return redirect(url_for('manage_questions'))
+
+        q_type = question['question_type']
+        q_text = question['question_text']
+        correct_answer = question['correct_answer'] or ''
+
+        if q_type in ('multiple_choice', 'multiple_select', 'true_false'):
+            options_text = ''
+            for letter in ['a', 'b', 'c', 'd', 'e', 'f']:
+                opt = question[f'option_{letter}']
+                if opt:
+                    options_text += f"{letter.upper()}. {opt}\n"
+            prompt = f"""
+            你是一位经验丰富的教师。请为以下{q_type}题目生成详细的解析。
+
+            题目内容：{q_text}
+            选项：
+            {options_text}
+            正确答案：{correct_answer}
+
+            请直接输出解析内容（纯文本，不要包含 JSON 或代码块标记），解析应包括：
+            1. 为什么正确答案是对的
+            2. 为什么其他选项是错的
+            3. 相关知识点补充
+            """
+        elif q_type == 'short_answer':
+            prompt = f"""
+            你是一位经验丰富的教师。请为以下简答题生成详细的解析。
+
+            题目内容：{q_text}
+            参考答案：{correct_answer}
+
+            请直接输出解析内容（纯文本），包括答题思路、要点分析和知识点补充。
+            """
+        elif q_type == 'programming':
+            solution = question['solution_code'] or correct_answer or '暂无'
+            prompt = f"""
+            你是一位经验丰富的编程教师。请为以下编程题生成详细的解析。
+
+            题目内容：{q_text}
+            参考答案代码：
+            {solution}
+
+            请直接输出解析内容（纯文本），包括解题思路、代码要点和易错点。
+            """
+        else:
+            prompt = f"请为以下题目生成详细解析。\n题目：{q_text}\n正确答案：{correct_answer}\n请直接输出纯文本解析。"
+
+        try:
+            response = dashscope.Generation.call(model='qwen-max', prompt=prompt)
+            explanation = response.output.text.strip()
+
+            if explanation.startswith('```'):
+                explanation = explanation.lstrip('`')
+            if explanation.endswith('```'):
+                explanation = explanation.rstrip('`')
+            explanation = explanation.strip()
+
+            conn.execute('UPDATE questions SET explanation = ? WHERE id = ?', (explanation, question_id))
+            conn.commit()
+
+            flash('解析已生成！', 'success')
+        except Exception as e:
+            logger.error(f"AI 生成解析失败: {e}")
+            flash(f'AI 生成解析失败: {str(e)}', 'error')
+
+    return redirect(url_for('manage_questions'))
+
+
+# 路由：批量生成解析
+@app.route('/generate_all_explanations', methods=['POST'])
+@login_required
+@role_required('teacher')
+def generate_all_explanations():
+    """批量为当前教师的所有题目生成解析"""
+    with get_db() as conn:
+        questions = conn.execute(
+            'SELECT id FROM questions WHERE teacher_id = ? AND (explanation IS NULL OR explanation = "")',
+            (session['user_id'],)
+        ).fetchall()
+
+    if not questions:
+        flash('没有需要生成解析的题目（所有题目已有解析）', 'info')
+        return redirect(url_for('manage_questions'))
+
+    success_count = 0
+    for q in questions:
+        with get_db() as conn:
+            question = conn.execute('SELECT * FROM questions WHERE id = ?', (q['id'],)).fetchone()
+            if not question:
+                continue
+
+            q_type = question['question_type']
+            q_text = question['question_text']
+            correct_answer = question['correct_answer'] or ''
+
+            if q_type in ('multiple_choice', 'multiple_select', 'true_false'):
+                options_text = ''
+                for letter in ['a', 'b', 'c', 'd', 'e', 'f']:
+                    opt = question[f'option_{letter}']
+                    if opt:
+                        options_text += f"{letter.upper()}. {opt}\n"
+                prompt = f"""
+                你是一位经验丰富的教师。请为以下{q_type}题目生成详细的解析。
+
+                题目内容：{q_text}
+                选项：
+                {options_text}
+                正确答案：{correct_answer}
+
+                请直接输出解析内容（纯文本），包括正确答案分析、错误选项分析和知识点补充。
+                """
+            elif q_type == 'short_answer':
+                prompt = f"""
+                你是一位经验丰富的教师。请为以下简答题生成详细的解析。
+
+                题目内容：{q_text}
+                参考答案：{correct_answer}
+
+                请直接输出解析内容（纯文本），包括答题思路、要点分析和知识点补充。
+                """
+            elif q_type == 'programming':
+                solution = question['solution_code'] or correct_answer or '暂无'
+                prompt = f"""
+                你是一位经验丰富的编程教师。请为以下编程题生成详细的解析。
+
+                题目内容：{q_text}
+                参考答案代码：
+                {solution}
+
+                请直接输出解析内容（纯文本），包括解题思路、代码要点和易错点。
+                """
+            else:
+                prompt = f"请为以下题目生成详细解析。\n题目：{q_text}\n正确答案：{correct_answer}\n请直接输出纯文本解析。"
+
+            try:
+                response = dashscope.Generation.call(model='qwen-max', prompt=prompt)
+                explanation = response.output.text.strip()
+                if explanation.startswith('```'):
+                    explanation = explanation.lstrip('`')
+                if explanation.endswith('```'):
+                    explanation = explanation.rstrip('`')
+                explanation = explanation.strip()
+
+                conn.execute('UPDATE questions SET explanation = ? WHERE id = ?', (explanation, q['id']))
+                conn.commit()
+                success_count += 1
+            except Exception as e:
+                logger.error(f"批量生成解析 - 题目 {q['id']} 失败: {e}")
+                continue
+
+    flash(f'批量生成完成！成功 {success_count}/{len(questions)} 题', 'success')
     return redirect(url_for('manage_questions'))
 
 
@@ -1308,18 +1676,17 @@ def delete_question(question_id):
 def toggle_exam_status(exam_id):
     """切换考试状态（激活/禁用）"""
     try:
-        conn = get_db_connection()
-        exam = conn.execute('SELECT status FROM exams WHERE id = ?', (exam_id,)).fetchone()
+        with get_db() as conn:
+            exam = conn.execute('SELECT status FROM exams WHERE id = ?', (exam_id,)).fetchone()
 
-        if exam:
-            new_status = 'inactive' if exam['status'] == 'active' else 'active'
-            conn.execute('UPDATE exams SET status = ? WHERE id = ?', (new_status, exam_id))
-            conn.commit()
+            if exam:
+                new_status = 'inactive' if exam['status'] == 'active' else 'active'
+                conn.execute('UPDATE exams SET status = ? WHERE id = ?', (new_status, exam_id))
+                conn.commit()
 
-            status_text = '禁用' if new_status == 'inactive' else '启用'
-            flash(f'✅ 考试已{status_text}！', 'success')
+                status_text = '禁用' if new_status == 'inactive' else '启用'
+                flash(f'✅ 考试已{status_text}！', 'success')
 
-        conn.close()
         return redirect(url_for('dashboard'))
     except Exception as e:
         flash(f'❌ 操作失败: {str(e)}', 'error')
@@ -1333,18 +1700,24 @@ def toggle_exam_status(exam_id):
 def clear_exam_scores(exam_id):
     """清空某场考试的所有成绩"""
     try:
-        conn = get_db_connection()
-        # 删除该考试的所有成绩记录
-        cursor = conn.execute('DELETE FROM exam_results WHERE exam_id = ?', (exam_id,))
-        deleted_count = cursor.rowcount
-        conn.commit()
-        conn.close()
+        with get_db() as conn:
+            # 删除该考试关联的评分记录
+            conn.execute('''
+                DELETE FROM grading_records
+                WHERE exam_record_id IN (
+                    SELECT id FROM exam_records WHERE exam_id = ?
+                )
+            ''', (exam_id,))
+            # 删除该考试的所有成绩记录
+            cursor = conn.execute('DELETE FROM exam_records WHERE exam_id = ?', (exam_id,))
+            deleted_count = cursor.rowcount
+            conn.commit()
 
-        flash(f'✅ 已清空 {deleted_count} 条考试成绩！', 'success')
-        return redirect(url_for('exam_results', exam_id=exam_id))
+        flash(f'已清空 {deleted_count} 条考试成绩！', 'success')
     except Exception as e:
-        flash(f'❌ 清空成绩失败: {str(e)}', 'error')
-        return redirect(url_for('exam_results', exam_id=exam_id))
+        logger.error(f"清空成绩失败: {e}")
+        flash(f'清空成绩失败: {str(e)}', 'error')
+    return redirect(url_for('exam_results', exam_id=exam_id))
 
 
 # 路由：删除考试
@@ -1354,26 +1727,27 @@ def clear_exam_scores(exam_id):
 def delete_exam(exam_id):
     """删除考试及其相关数据"""
     try:
-        conn = get_db_connection()
+        with get_db() as conn:
+            # 删除该考试关联的评分记录
+            conn.execute('''
+                DELETE FROM grading_records
+                WHERE exam_record_id IN (
+                    SELECT id FROM exam_records WHERE exam_id = ?
+                )
+            ''', (exam_id,))
+            # 删除该考试的所有成绩记录
+            conn.execute('DELETE FROM exam_records WHERE exam_id = ?', (exam_id,))
+            # 删除该考试的所有题目关联
+            conn.execute('DELETE FROM exam_questions WHERE exam_id = ?', (exam_id,))
+            # 删除考试本身
+            conn.execute('DELETE FROM exams WHERE id = ?', (exam_id,))
+            conn.commit()
 
-        # 删除该考试的所有成绩记录
-        conn.execute('DELETE FROM exam_records WHERE exam_id = ?', (exam_id,))
-
-        # 删除该考试的所有题目关联
-        conn.execute('DELETE FROM exam_questions WHERE exam_id = ?', (exam_id,))
-
-        # 删除考试本身
-        conn.execute('DELETE FROM exams WHERE id = ?', (exam_id,))
-
-        conn.commit()
-        conn.close()
-
-        flash('✅ 考试已成功删除！', 'success')
-        return redirect(url_for('dashboard'))
-
+        flash('考试已成功删除！', 'success')
     except Exception as e:
-        flash(f'❌ 删除考试失败: {str(e)}', 'error')
-        return redirect(url_for('dashboard'))
+        logger.error(f"删除考试失败: {e}")
+        flash(f'删除考试失败: {str(e)}', 'error')
+    return redirect(url_for('dashboard'))
 
 
 if __name__ == '__main__':

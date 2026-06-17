@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>在线考试系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">在线考试系统</a>
+            <div class="navbar-nav ms-auto">
+                {% if session.user_id %}
+                    <span class="navbar-text me-3">欢迎, {{ session.username }} ({{ session.role }})</span>
+                    <a class="btn btn-outline-light" href="{{ url_for('logout') }}">退出</a>
+                {% else %}
+                    <a class="btn btn-outline-light me-2" href="{{ url_for('login') }}">登录</a>
+                    <a class="btn btn-outline-light" href="{{ url_for('register') }}">注册</a>
+                {% endif %}
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-5">
+        <div class="row">
+            <div class="col-md-8 mx-auto text-center">
+                <h1 class="display-4 mb-4">欢迎使用在线考试系统</h1>
+                <p class="lead">这是一个功能完整的在线考试平台，支持教师出题、学生答题、自动评分等功能。</p>
+
+                {% if not session.user_id %}
+                    <div class="mt-4">
+                        <a href="{{ url_for('login') }}" class="btn btn-primary btn-lg me-3">登录</a>
+                        <a href="{{ url_for('register') }}" class="btn btn-secondary btn-lg">注册</a>
+                    </div>
+                {% else %}
+                    <div class="mt-4">
+                        <a href="{{ url_for('dashboard') }}" class="btn btn-primary btn-lg">进入仪表板</a>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智能出题 - 在线考试系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .type-card {
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 2px solid #dee2e6;
+        }
+        .type-card:hover {
+            border-color: #0d6efd;
+            background-color: #f0f6ff;
+        }
+        .type-card.selected {
+            border-color: #0d6efd;
+            background-color: #e7f1ff;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">在线考试系统</a>
+            <div class="navbar-nav ms-auto">
+                <span class="navbar-text me-3">欢迎, {{ session.username }} (教师)</span>
+                <a class="btn btn-outline-light btn-sm me-2" href="javascript:history.back()">返回</a>
+                <a class="btn btn-outline-light btn-sm" href="{{ url_for('logout') }}">退出</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-5">
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-info alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="row justify-content-center">
+            <div class="col-md-10">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white py-3">
+                        <h5 class="mb-0 text-primary"><i class="bi bi-robot me-2"></i>AI 智能出题</h5>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted small">
+                            <i class="bi bi-info-circle me-1"></i>
+                            选择题型、输入专业课主题，AI 将自动生成题目并配套解析入库。生成过程可能需要 5-15 秒。
+                        </p>
+
+                        <form action="{{ url_for('ai_generate') }}" method="POST" id="aiForm">
+                            <!-- 题型选择 -->
+                            <label class="form-label fw-bold">题型选择</label>
+                            <div class="row g-2 mb-3">
+                                <div class="col">
+                                    <div class="type-card selected p-3 text-center rounded" data-type="multiple_choice" onclick="selectType(this)">
+                                        <i class="bi bi-list-check d-block fs-3"></i>
+                                        <span class="small fw-bold">单选题</span>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <div class="type-card p-3 text-center rounded" data-type="multiple_select" onclick="selectType(this)">
+                                        <i class="bi bi-ui-checks d-block fs-3"></i>
+                                        <span class="small fw-bold">多选题</span>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <div class="type-card p-3 text-center rounded" data-type="true_false" onclick="selectType(this)">
+                                        <i class="bi bi-check2-square d-block fs-3"></i>
+                                        <span class="small fw-bold">判断题</span>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <div class="type-card p-3 text-center rounded" data-type="short_answer" onclick="selectType(this)">
+                                        <i class="bi bi-pencil-square d-block fs-3"></i>
+                                        <span class="small fw-bold">简答题</span>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <div class="type-card p-3 text-center rounded" data-type="programming" onclick="selectType(this)">
+                                        <i class="bi bi-code-slash d-block fs-3"></i>
+                                        <span class="small fw-bold">编程题</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <input type="hidden" name="question_type" id="question_type" value="multiple_choice">
+
+                            <div class="row g-3">
+                                <!-- 专业课/科目 -->
+                                <div class="col-md-6">
+                                    <label for="topic" class="form-label fw-bold">专业课/科目</label>
+                                    <input type="text" class="form-control" id="topic" name="topic"
+                                           list="subject_list" placeholder="例如：数据结构, 计算机网络, 高等数学" required>
+                                    <datalist id="subject_list">
+                                        <option value="数据结构">
+                                        <option value="计算机网络">
+                                        <option value="操作系统">
+                                        <option value="数据库原理">
+                                        <option value="Python程序设计">
+                                        <option value="Java程序设计">
+                                        <option value="高等数学">
+                                        <option value="线性代数">
+                                        <option value="概率论与数理统计">
+                                        <option value="计算机组成原理">
+                                        <option value="软件工程">
+                                        <option value="人工智能">
+                                        <option value="机器学习">
+                                        <option value="C语言程序设计">
+                                        <option value="算法设计与分析">
+                                    </datalist>
+                                </div>
+
+                                <!-- 难度 & 数量 -->
+                                <div class="col-md-3">
+                                    <label for="difficulty" class="form-label fw-bold">难度</label>
+                                    <select class="form-select" id="difficulty" name="difficulty" required>
+                                        <option value="简单">简单</option>
+                                        <option value="中等" selected>中等</option>
+                                        <option value="困难">困难</option>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-3">
+                                    <label for="num" class="form-label fw-bold">生成数量</label>
+                                    <input type="number" class="form-control" id="num" name="num" value="5" min="1" max="20" required>
+                                </div>
+
+                                <!-- 题型说明 -->
+                                <div class="col-12">
+                                    <div class="alert alert-light border" id="type_hint">
+                                        <small class="text-muted">
+                                            <strong>单选题：</strong>AI 将生成包含4个选项和1个正确答案的题目，配套解析自动入库。
+                                        </small>
+                                    </div>
+                                </div>
+
+                                <!-- 提交按钮 -->
+                                <div class="col-12 mt-2 text-center">
+                                    <button type="submit" class="btn btn-primary btn-lg px-5" id="submitBtn">
+                                        <i class="bi bi-magic me-2"></i> 开始生成
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="text-center mt-3">
+                    <a href="{{ url_for('dashboard') }}" class="text-decoration-none text-secondary">
+                        <i class="bi bi-arrow-left me-1"></i> 返回仪表板
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        var typeHints = {
+            'multiple_choice': '<strong>单选题：</strong>AI 将生成包含4个选项和1个正确答案的题目，配套解析自动入库。',
+            'multiple_select': '<strong>多选题：</strong>AI 将生成包含4-6个选项和多个正确答案的题目，配套解析自动入库。',
+            'true_false': '<strong>判断题：</strong>AI 将生成判断陈述对错的题目，配套解析自动入库。',
+            'short_answer': '<strong>简答题：</strong>AI 将生成简答题并提供参考答案，配套解析自动入库。提交后由 AI 语义评分 + 教师复审。',
+            'programming': '<strong>编程题：</strong>AI 将生成编程题并附带测试用例和参考代码，配套解析自动入库。提交后自动评测 + 教师复审。'
+        };
+
+        function selectType(el) {
+            document.querySelectorAll('.type-card').forEach(function(c) {
+                c.classList.remove('selected');
+            });
+            el.classList.add('selected');
+            var type = el.getAttribute('data-type');
+            document.getElementById('question_type').value = type;
+            document.getElementById('type_hint').innerHTML =
+                '<small class="text-muted">' + typeHints[type] + '</small>';
+        }
+
+        document.getElementById('aiForm').onsubmit = function() {
+            var btn = document.getElementById('submitBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loader"></span> AI 正在思考中...';
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-secondary');
+        };
+    </script>
+</body>
+</html>
